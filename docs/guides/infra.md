@@ -103,6 +103,7 @@ Creating the namespace is `setup` (once); migrating it is a task with `when: lan
 - `devlanes start` brings infra up for the lane. Shared containers stay up while any lane of the project runs.
 - `devlanes stop` stops processes only; containers keep running.
 - `devlanes infra down` stops the shared containers (data kept); per-lane containers are untouched. `infra up` and `infra status` are the counterparts.
+- A frozen lane's per-lane containers are paused until the lane thaws ([idle lanes](lifecycle.md#idle-lanes)). When the daemon starts, it unpauses every lane's own paused containers, including ones paused by hand with `docker pause`.
 - `devlanes lane clean <lane> --yes` runs `lane.clean` tasks and `teardown`, then removes the lane's Compose project with its volumes and the lane's plain containers and named volumes. Shared containers and their data survive.
 - A profile with `infra: false` skips containers and setup; services that reference `infra.*` then fail to resolve, so keep those references out of the profile's services or point them elsewhere in the profile's `env`.
 

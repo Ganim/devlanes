@@ -68,10 +68,31 @@ impl Inner {
         // client's start timeout. Adoption only re-attaches event watchers, so
         // no request needs it before readiness.
         let infra = self.integ.infra.clone();
+        let lanes: Vec<(String, u32)> = self
+            .all_lanes()
+            .iter()
+            .filter_map(|(project, lane)| Some((project.name(), lane.st().index()?)))
+            .collect();
         tokio::spawn(async move {
             match infra.adopt(&names).await {
                 Ok(adopted) => tracing::info!(%adopted, "re-adopted containers"),
-                Err(error) => tracing::debug!(code = %error.code, "container adoption skipped"),
+                Err(error) => {
+                    tracing::debug!(code = %error.code, "container adoption skipped");
+                    return;
+                }
+            }
+            // A previous daemon may have crashed while a lane was frozen and its
+            // own containers paused; this daemon starts with every lane awake.
+            for (project, lane) in lanes {
+                match infra.unpause_lane(&project, lane).await {
+                    Ok(0) => {}
+                    Ok(unpaused) => {
+                        tracing::info!(%project, lane, unpaused, "unpaused containers of a frozen lane");
+                    }
+                    Err(error) => {
+                        tracing::debug!(code = %error.code, "unpausing lane containers failed")
+                    }
+                }
             }
         });
         self.start_dns().await;
@@ -178,6 +199,7 @@ impl Inner {
         tokio::spawn(self.clone().log_maintenance_loop());
         tokio::spawn(self.clone().orphan_watch_loop());
         tokio::spawn(self.clone().update_check_loop());
+        tokio::spawn(self.clone().idle_loop());
         if let Some(mut events) = self.integ.infra.events() {
             let engine = self.clone();
             tokio::spawn(async move {

@@ -151,6 +151,43 @@ fn config_invalid(data: &Value) -> String {
     }
 }
 
+/// What woke or last kept a lane awake (`LanePower.last_activity`,
+/// `lane.thawed.activity`) as words: `a request`, `a stop`.
+pub(crate) fn activity(word: &str) -> String {
+    match word {
+        "proxy" => "a request".into(),
+        "connection" => "a connection".into(),
+        "cpu" => "CPU use".into(),
+        "command" => "a command".into(),
+        "start" => "a start".into(),
+        // A stop, restart or clean thaws the lane before it stops anything.
+        "stop" => "a stop".into(),
+        "" => "activity".into(),
+        other => other.into(),
+    }
+}
+
+/// `lane acme@2`, or `this lane` when the error names none.
+fn or_this_lane(lane: &str) -> String {
+    if lane.is_empty() {
+        "this lane".into()
+    } else {
+        format!("lane {lane}")
+    }
+}
+
+/// `devlanes ARGS --lane LANE`, without `--lane` when `lane` is empty.
+fn lane_command<S: AsRef<str>>(args: impl IntoIterator<Item = S>, lane: &str) -> Hint {
+    let mut args: Vec<String> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect();
+    if !lane.is_empty() {
+        args.extend(["--lane".to_owned(), lane.to_owned()]);
+    }
+    Hint::command(args)
+}
+
 /// Integer field.
 fn int(data: &Value, key: &str) -> Option<i64> {
     data.get(key).and_then(Value::as_i64)
@@ -434,6 +471,97 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
                 _ => ("the lane is already running".into(), None),
             }
         }
+        // `debug freeze` refusals, each `{lane}`; keep_awake and orphans add `units`.
+        "lane_not_running" => {
+            let lane = text(data, "lane");
+            (
+                format!("{} has no running service to freeze", or_this_lane(&lane)),
+                Some(lane_command(["status"], &lane)),
+            )
+        }
+        "lane_busy" => (
+            format!(
+                "{} is starting, stopping or running a task; retry when it is done",
+                or_this_lane(&text(data, "lane"))
+            ),
+            Some(lane_command(["status"], &text(data, "lane"))),
+        ),
+        "lane_keep_awake" => {
+            let units: Vec<String> = list(data, "units").iter().map(display_value).collect();
+            let keys: Vec<String> = units
+                .iter()
+                .map(|unit| format!("services.{unit}.keep_awake"))
+                .collect();
+            let lane = or_this_lane(&text(data, "lane"));
+            (
+                if units.is_empty() {
+                    format!("{lane} runs a service with keep_awake, so it stays awake")
+                } else {
+                    format!(
+                        "{lane} runs keep_awake services ({}), so it stays awake",
+                        units.join(", ")
+                    )
+                },
+                // The key can come from devlanes.local.yaml, a template or an
+                // expression, so the hint names the setting, not a file.
+                Some(Hint(if keys.is_empty() {
+                    "set services.<name>.keep_awake to false in the project config to let it freeze".into()
+                } else {
+                    format!(
+                        "set {} to false in the project config to let it freeze",
+                        keys.join(" and ")
+                    )
+                })),
+            )
+        }
+        "lane_has_orphans" => {
+            let lane = text(data, "lane");
+            let units: Vec<String> = list(data, "units").iter().map(display_value).collect();
+            (
+                format!(
+                    "{} has units left running by a previous daemon{}; they are not supervised, so the lane is not frozen",
+                    or_this_lane(&lane),
+                    if units.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", units.join(", "))
+                    }
+                ),
+                Some(if units.is_empty() {
+                    lane_command(["status"], &lane)
+                } else {
+                    let mut args = vec!["stop".to_owned()];
+                    args.extend(units);
+                    lane_command(args, &lane)
+                }),
+            )
+        }
+        // A runner refused to change a process. Going idle is undone, so the
+        // lane runs normally; a failed thaw (`normal`) leaves it idle and retries.
+        "idle_failed" | "thaw_failed" => {
+            let message = match text(data, "message") {
+                message if message.is_empty() => String::new(),
+                message => format!(": {message}"),
+            };
+            let lane = or_this_lane(&text(data, "lane"));
+            let level = text(data, "level");
+            if error.code == "thaw_failed" || level == "normal" {
+                (
+                    format!("{lane} could not be thawed{message}; it stays idle and devlanes retries"),
+                    None,
+                )
+            } else {
+                let level = if level.is_empty() { "frozen".into() } else { level };
+                (
+                    format!("{lane} could not be {level}{message}; it runs normally"),
+                    None,
+                )
+            }
+        }
+        "throttle_unsupported" => (
+            "this system cannot throttle processes; idle lanes are frozen after lanes.freeze_after instead".into(),
+            None,
+        ),
         "daemon_stopping" => (
             "the daemon is shutting down; retry once it has stopped, or start a new one now".into(),
             Some(Hint::command(["daemon", "restart"])),

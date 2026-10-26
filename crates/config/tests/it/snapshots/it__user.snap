@@ -14,7 +14,9 @@ expression: user
     "range": "20000-32767"
   },
   "lanes": {
-    "data_dir": "~/.devlanes/data"
+    "data_dir": "~/.devlanes/data",
+    "throttle_after": "300000ms",
+    "freeze_after": "900000ms"
   },
   "tls": {
     "ca": "devlanes",

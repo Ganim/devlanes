@@ -12,7 +12,7 @@ use std::{
 
 use bytes::Bytes;
 use devlanes_core::{
-    Error, LaunchSpec, OutputChunk, OutputStream, ProcessIdentity, StopPolicy, StopSignal,
+    Error, LaunchSpec, OutputChunk, OutputStream, Power, ProcessIdentity, StopPolicy, StopSignal,
     TerminalSize, Unit,
 };
 use devlanes_runner_pty::{ExitSweep, PtyRunner, PtyUnit, StderrMode};
@@ -618,6 +618,288 @@ async fn stopped_unit_acts_on_stop_signal() -> Result<(), Error> {
             .await?;
         assert_eq!(report.outcome.signal, Some(15), "{report:?}");
         assert!(!report.stop.expect("stopped").escalated);
+        Ok(())
+    })
+    .await
+}
+
+/// `ps` columns for `pids`, keyed by PID; exited PIDs are missing.
+fn ps_column(pids: &[u32], column: &str) -> BTreeMap<u32, String> {
+    let list = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let output = std::process::Command::new("ps")
+        .args(["-o", &format!("pid=,{column}="), "-p", &list])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, value) = line.trim().split_once(char::is_whitespace)?;
+            Some((pid.parse().ok()?, value.trim().to_owned()))
+        })
+        .collect()
+}
+
+/// Reports whether every PID in `pids` is alive and frozen: stopped by a signal
+/// (state `T`), or, on Linux, blocked in `vfork` (state `D`) for a child that
+/// was stopped before it could exec. dash forks commands with `vfork`, so a
+/// freeze that lands mid-fork leaves the shell waiting there, not stopped.
+fn all_stopped(pids: &[u32]) -> bool {
+    let output = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,stat="])
+        .output()
+        .expect("run ps");
+    let table: Vec<(u32, u32, String)> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            Some((pid, ppid, fields.next()?.to_owned()))
+        })
+        .collect();
+    let stopped = |stat: &str| stat.starts_with('T');
+    pids.iter().all(|pid| {
+        table.iter().any(|(p, _, stat)| {
+            *p == *pid
+                && (stopped(stat)
+                    || (stat.starts_with('D')
+                        && table
+                            .iter()
+                            .any(|(_, parent, child)| parent == pid && stopped(child))))
+        })
+    })
+}
+
+/// Reports whether no PID in `pids` is stopped.
+fn none_stopped(pids: &[u32]) -> bool {
+    ps_column(pids, "stat")
+        .values()
+        .all(|stat| !stat.starts_with('T'))
+}
+
+/// Starts `script` with the setsid helper available and waits until the
+/// supervisor tracks the helper, which then sits in its own session and group.
+/// Returns the unit and the helper's PID.
+async fn unit_with_escapee(
+    script: &str,
+    env: &[(&str, &str)],
+    cleanup: &mut Cleanup,
+) -> Result<(Arc<PtyUnit>, u32), Error> {
+    let mut launch = with_helper(&format!("{START_HELPER} {script}"), false)?;
+    for (key, value) in env {
+        launch.env.insert((*key).into(), (*value).into());
+    }
+    let unit = runner().spawn_unit(launch).await?;
+    cleanup.unit(&unit);
+    let mut output = unit.output();
+    let escapee = number_after(&read_until(&mut output, "SETSID pid=").await, "SETSID pid=");
+    cleanup.pid(escapee);
+    eventually(|| async {
+        unit.descendants()
+            .await
+            .is_ok_and(|d| d.iter().any(|p| p.pid == escapee && p.sid == Some(escapee)))
+    })
+    .await;
+    Ok((unit, escapee))
+}
+
+/// Freezing stops the leader and a descendant that left the session; while
+/// frozen the script makes no progress, and after a thaw it runs again.
+#[tokio::test]
+async fn freeze_stops_tree_and_thaw_resumes_it() -> Result<(), Error> {
+    bounded(async {
+        let dir = tempfile::tempdir()?;
+        let counter = dir.path().join("counter");
+        let counter_text = counter.to_string_lossy().into_owned();
+        let mut cleanup = Cleanup::default();
+        let (unit, escapee) = unit_with_escapee(
+            "i=0; while :; do i=$((i+1)); echo $i > \"$COUNTER\"; sleep 0.02; done",
+            &[("COUNTER", &counter_text)],
+            &mut cleanup,
+        )
+        .await?;
+        eventually(|| async { std::fs::read_to_string(&counter).is_ok() }).await;
+        let tree = [unit.identity().pid, escapee];
+
+        unit.set_power(Power::Frozen).await?;
+        eventually(|| async { all_stopped(&tree) }).await;
+        let frozen = std::fs::read_to_string(&counter)?;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(std::fs::read_to_string(&counter)?, frozen);
+        assert!(all_stopped(&tree));
+        assert!(unit.exit_report().is_none());
+        // Freezing again is harmless.
+        unit.set_power(Power::Frozen).await?;
+
+        unit.set_power(Power::Normal).await?;
+        eventually(|| async { none_stopped(&tree) }).await;
+        eventually(|| async {
+            std::fs::read_to_string(&counter)
+                .is_ok_and(|now| !now.trim().is_empty() && now != frozen)
+        })
+        .await;
+        assert!(alive(escapee));
+        unit.stop(StopPolicy::default()).await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A process that keeps forking outside the leader's process group ends up
+/// stopped with every child it made, through the freeze's rescans and the
+/// supervisor's ticks.
+#[tokio::test]
+async fn fork_loop_ends_fully_stopped() -> Result<(), Error> {
+    bounded(async {
+        // `set -m` puts the forking subshell in its own process group.
+        let script = "set -m; (while :; do sleep 1 & sleep 0.02; done) & wait";
+        let unit = runner().spawn_unit(shell(script, false)).await?;
+        let mut cleanup = Cleanup::default();
+        cleanup.unit(&unit);
+        eventually(|| async { unit.descendants().await.is_ok_and(|d| d.len() >= 5) }).await;
+
+        unit.set_power(Power::Frozen).await?;
+        eventually(|| async {
+            let pids: Vec<u32> = unit
+                .processes()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .map(|p| p.pid)
+                .collect();
+            all_stopped(&pids)
+        })
+        .await;
+        unit.stop_with_report(StopPolicy {
+            signal: StopSignal::Kill,
+            timeout: Duration::from_secs(5),
+        })
+        .await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A stop ends a frozen unit with its own signal, without escalating, and the
+/// unit then refuses power changes.
+#[tokio::test]
+async fn stopping_a_frozen_unit_ends_it() -> Result<(), Error> {
+    bounded(async {
+        let mut cleanup = Cleanup::default();
+        let (unit, escapee) =
+            unit_with_escapee("while :; do sleep 1; done", &[], &mut cleanup).await?;
+        unit.set_power(Power::Frozen).await?;
+        eventually(|| async { all_stopped(&[unit.identity().pid, escapee]) }).await;
+
+        let report = unit
+            .stop_with_report(StopPolicy {
+                signal: StopSignal::Terminate,
+                timeout: Duration::from_secs(5),
+            })
+            .await?;
+        assert_eq!(report.outcome.signal, Some(15), "{report:?}");
+        assert!(!report.stop.expect("stopped").escalated, "{report:?}");
+        assert!(report.escaped.is_empty(), "{report:?}");
+        assert!(!alive(escapee), "setsid descendant survived the stop");
+        assert!(matches!(
+            unit.set_power(Power::Normal).await,
+            Err(Error::Exited)
+        ));
+        Ok(())
+    })
+    .await
+}
+
+/// A frozen leader that would exit if it ran is never reported as exited; after
+/// the thaw it exits on its own with its real status.
+#[tokio::test]
+async fn frozen_unit_never_reports_exit() -> Result<(), Error> {
+    bounded(async {
+        let dir = tempfile::tempdir()?;
+        let gate = dir.path().join("gate");
+        let mut launch = shell(
+            "echo ready; while [ ! -e \"$GATE\" ]; do sleep 0.02; done; exit 4",
+            false,
+        );
+        launch
+            .env
+            .insert("GATE".into(), gate.to_string_lossy().into_owned());
+        let unit = runner().spawn_unit(launch).await?;
+        let mut cleanup = Cleanup::default();
+        cleanup.unit(&unit);
+        let mut output = unit.output();
+        read_until(&mut output, "ready").await;
+
+        unit.set_power(Power::Frozen).await?;
+        eventually(|| async { all_stopped(&[unit.identity().pid]) }).await;
+        std::fs::write(&gate, "")?;
+        // Many track ticks and SIGCHLD wakeups pass in this window.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(600), unit.wait())
+                .await
+                .is_err(),
+            "frozen unit reported an exit"
+        );
+        assert!(unit.exit_report().is_none());
+
+        unit.set_power(Power::Normal).await?;
+        let report = unit.wait_report().await?;
+        assert_eq!(report.outcome.code, Some(4), "{report:?}");
+        assert!(report.stop.is_none());
+        assert!(matches!(
+            unit.set_power(Power::Frozen).await,
+            Err(Error::Exited)
+        ));
+        Ok(())
+    })
+    .await
+}
+
+/// Throttling uses the macOS background band (scheduling priority 4) and is
+/// undone by `Normal`; from `Frozen` it also resumes the tree. Other systems
+/// refuse it and leave the unit as it was.
+#[tokio::test]
+async fn throttle_round_trip() -> Result<(), Error> {
+    bounded(async {
+        let unit = runner().spawn_unit(shell("sleep 30", false)).await?;
+        let mut cleanup = Cleanup::default();
+        cleanup.unit(&unit);
+        let leader = unit.identity().pid;
+        let priority = || ps_column(&[leader], "pri").remove(&leader);
+
+        if cfg!(target_os = "macos") {
+            let normal = priority().expect("leader priority");
+            // `ps` shows the priority the thread was last scheduled with, which
+            // can lag the policy change while the shell is still starting.
+            unit.set_power(Power::Throttled).await?;
+            eventually(|| async { priority().as_deref() == Some("4") }).await;
+            unit.set_power(Power::Frozen).await?;
+            eventually(|| async { all_stopped(&[leader]) }).await;
+            unit.set_power(Power::Throttled).await?;
+            eventually(|| async { none_stopped(&[leader]) }).await;
+            eventually(|| async { priority().as_deref() == Some("4") }).await;
+            unit.set_power(Power::Normal).await?;
+            eventually(|| async { priority() == Some(normal.clone()) }).await;
+        } else {
+            assert!(matches!(
+                unit.set_power(Power::Throttled).await,
+                Err(Error::Unsupported(_))
+            ));
+            unit.set_power(Power::Frozen).await?;
+            eventually(|| async { all_stopped(&[leader]) }).await;
+            assert!(matches!(
+                unit.set_power(Power::Throttled).await,
+                Err(Error::Unsupported(_))
+            ));
+            assert!(all_stopped(&[leader]));
+            unit.set_power(Power::Normal).await?;
+            eventually(|| async { none_stopped(&[leader]) }).await;
+        }
+        unit.stop(StopPolicy::default()).await?;
         Ok(())
     })
     .await

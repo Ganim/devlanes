@@ -203,18 +203,47 @@ impl ComposeCli {
         no_deps: bool,
         options: UpOptions,
     ) -> Result<(), Error> {
+        self.up_with(project, extra_files, services, no_deps, options, true)
+            .await
+    }
+
+    /// Starts `services` detached like [`Self::up`] without waiting for health, for
+    /// containers whose health Docker misreports right after an unpause.
+    pub(crate) async fn up_no_wait(
+        &self,
+        project: &ComposeProject,
+        extra_files: &[PathBuf],
+        services: &[String],
+        no_deps: bool,
+        options: UpOptions,
+    ) -> Result<(), Error> {
+        self.up_with(project, extra_files, services, no_deps, options, false)
+            .await
+    }
+
+    /// `up --detach`, with `--wait` when `wait` is set.
+    async fn up_with(
+        &self,
+        project: &ComposeProject,
+        extra_files: &[PathBuf],
+        services: &[String],
+        no_deps: bool,
+        options: UpOptions,
+        wait: bool,
+    ) -> Result<(), Error> {
         // An empty list would make Compose start every service in the files.
         if services.is_empty() {
             return Ok(());
         }
         let mut args = project.args(extra_files);
-        args.extend([
-            "up".into(),
-            "--detach".into(),
-            "--wait".into(),
-            "--wait-timeout".into(),
-            options.wait_timeout.as_secs().max(1).to_string().into(),
-        ]);
+        args.extend(["up".into(), "--detach".into()]);
+        if wait {
+            args.extend([
+                "--wait".into(),
+                "--wait-timeout".into(),
+                options.wait_timeout.as_secs().max(1).to_string().into(),
+            ]);
+        }
         if options.remove_orphans {
             args.push("--remove-orphans".into());
         }
@@ -264,17 +293,58 @@ impl ComposeCli {
             .map(drop)
     }
 
+    /// Pauses the project's containers of `services`, by project name only. An empty
+    /// list does nothing. Compose fails the call when one of them is already paused or
+    /// not running, so callers pass only running services.
+    pub async fn pause(
+        &self,
+        project: &str,
+        services: &[String],
+        timeout: Duration,
+    ) -> Result<(), Error> {
+        self.by_services(project, "pause", services, timeout).await
+    }
+
+    /// Unpauses the project's containers of `services`, by project name only. An empty
+    /// list does nothing. Compose fails the call when one of them is not paused.
+    pub async fn unpause(
+        &self,
+        project: &str,
+        services: &[String],
+        timeout: Duration,
+    ) -> Result<(), Error> {
+        self.by_services(project, "unpause", services, timeout)
+            .await
+    }
+
     /// Looks up containers by exact name. Missing names are skipped.
     pub async fn inspect_containers(
         &self,
         names: &[String],
     ) -> Result<Vec<ExistingContainer>, Error> {
-        if names.is_empty() {
-            return Ok(Vec::new());
-        }
+        let (stdout, command) = self.inspect(names).await?;
+        parse_inspect(&stdout).map_err(|source| Error::Json { command, source })
+    }
+
+    /// Why each of the containers `names` reads `unhealthy`, keyed by container name.
+    /// Containers that are missing or have another health status are left out.
+    pub(crate) async fn unhealthy_causes(
+        &self,
+        names: &[String],
+    ) -> Result<BTreeMap<String, UnhealthyCause>, Error> {
+        let (stdout, command) = self.inspect(names).await?;
+        parse_unhealthy_causes(&stdout).map_err(|source| Error::Json { command, source })
+    }
+
+    /// Runs `docker container inspect` on `names` and returns its stdout with the
+    /// command line for errors.
+    async fn inspect(&self, names: &[String]) -> Result<(String, String), Error> {
         let mut args: Vec<OsString> = vec!["container".into(), "inspect".into(), "--".into()];
         args.extend(names.iter().map(OsString::from));
         let command = display(&args);
+        if names.is_empty() {
+            return Ok((String::new(), command));
+        }
         // `inspect` exits 1 when any name is missing but still prints the found ones.
         let output = self
             .spawn(&neutral_cwd(), &args, &BTreeMap::new(), QUERY_TIMEOUT)
@@ -288,7 +358,26 @@ impl ComposeCli {
                 stderr: stderr.trim().to_owned(),
             });
         }
-        parse_inspect(&stdout).map_err(|source| Error::Json { command, source })
+        Ok((stdout.into_owned(), command))
+    }
+
+    /// `docker compose -p <project> <subcommand> -- <services>`, skipped when
+    /// `services` is empty because Compose would then act on every service.
+    async fn by_services(
+        &self,
+        project: &str,
+        subcommand: &str,
+        services: &[String],
+        timeout: Duration,
+    ) -> Result<(), Error> {
+        if services.is_empty() {
+            return Ok(());
+        }
+        let mut args = by_name(project, [subcommand, "--"]);
+        args.extend(services.iter().map(OsString::from));
+        self.run(&neutral_cwd(), args, &BTreeMap::new(), timeout)
+            .await
+            .map(drop)
     }
 
     async fn run(
@@ -391,12 +480,105 @@ struct InspectEntry {
     name: String,
     #[serde(rename = "Config")]
     config: Option<InspectConfig>,
+    #[serde(rename = "State")]
+    state: Option<InspectState>,
 }
 
 #[derive(Deserialize)]
 struct InspectConfig {
     #[serde(rename = "Labels", default)]
     labels: Option<BTreeMap<String, String>>,
+    #[serde(rename = "Healthcheck")]
+    healthcheck: Option<InspectHealthcheck>,
+}
+
+#[derive(Deserialize)]
+struct InspectHealthcheck {
+    #[serde(rename = "Retries", default)]
+    retries: i64,
+}
+
+#[derive(Deserialize)]
+struct InspectState {
+    #[serde(rename = "Health")]
+    health: Option<InspectHealth>,
+}
+
+#[derive(Deserialize)]
+struct InspectHealth {
+    #[serde(rename = "Status", default)]
+    status: String,
+    #[serde(rename = "FailingStreak", default)]
+    failing_streak: i64,
+    #[serde(rename = "Log", default, deserialize_with = "null_as_empty")]
+    log: Vec<InspectCheck>,
+}
+
+#[derive(Deserialize)]
+struct InspectCheck {
+    #[serde(rename = "ExitCode", default)]
+    exit_code: Option<i64>,
+}
+
+/// Docker's default `Healthcheck.Retries`, used when the config leaves it at 0.
+const DEFAULT_HEALTH_RETRIES: i64 = 3;
+
+/// Why Docker reports a running container `unhealthy`.
+///
+/// Docker sets `unhealthy` when it stops the health monitor on pause, keeping the
+/// failing streak, and the status stays until the next check after the unpause.
+/// Only a streak of `retries` failed checks makes a container really unhealthy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnhealthyCause {
+    /// Paused while healthy: a check passed and fewer than `retries` failed since.
+    PausedHealthy,
+    /// Paused before any check passed.
+    PausedStarting,
+    /// `retries` checks in a row failed.
+    Failed,
+}
+
+/// `null` in Docker's JSON reads as an empty list.
+fn null_as_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// [`UnhealthyCause`] by container name for the `unhealthy` containers in
+/// `docker container inspect` output.
+fn parse_unhealthy_causes(
+    stdout: &str,
+) -> Result<BTreeMap<String, UnhealthyCause>, serde_json::Error> {
+    if stdout.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let entries: Vec<InspectEntry> = serde_json::from_str(stdout)?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|entry| {
+            let retries = entry
+                .config
+                .and_then(|config| config.healthcheck)
+                .map(|check| check.retries)
+                .filter(|retries| *retries > 0)
+                .unwrap_or(DEFAULT_HEALTH_RETRIES);
+            let health = entry.state?.health?;
+            if health.status != "unhealthy" {
+                return None;
+            }
+            let cause = if health.failing_streak >= retries {
+                UnhealthyCause::Failed
+            } else if health.log.iter().any(|check| check.exit_code == Some(0)) {
+                UnhealthyCause::PausedHealthy
+            } else {
+                UnhealthyCause::PausedStarting
+            };
+            Some((entry.name.trim_start_matches('/').to_owned(), cause))
+        })
+        .collect())
 }
 
 /// Parses `docker container inspect` output; Docker prefixes names with `/`.
@@ -489,6 +671,65 @@ mod tests {
         assert_eq!(found[0].labels["com.docker.compose.project"], "acme");
         assert!(found[1].labels.is_empty());
         assert!(parse_inspect("[]\n").expect("valid").is_empty());
+    }
+
+    /// `unhealthy` counts as a failure only once the failing streak reaches the
+    /// configured retries, or Docker's default of 3; below that a passed check in
+    /// the log tells a container paused while healthy from one still starting.
+    #[test]
+    fn unhealthy_causes_follow_retries_and_log() {
+        let entry = |name: &str, retries: &str, status: &str, streak: i64, log: &str| {
+            format!(
+                r#"{{"Id":"id-{name}","Name":"/{name}","Config":{{"Labels":null{retries}}},
+                "State":{{"Health":{{"Status":"{status}","FailingStreak":{streak},"Log":{log}}}}}}}"#
+            )
+        };
+        let ok = r#"[{"ExitCode":0}]"#;
+        let failed = r#"[{"ExitCode":0},{"ExitCode":1},{"ExitCode":1}]"#;
+        let json = format!(
+            "[{}]",
+            [
+                entry("fresh", "", "unhealthy", 0, ok),
+                entry("flaky", "", "unhealthy", 2, failed),
+                entry(
+                    "zero",
+                    r#","Healthcheck":{"Retries":0}"#,
+                    "unhealthy",
+                    2,
+                    failed
+                ),
+                entry(
+                    "strict",
+                    r#","Healthcheck":{"Retries":2}"#,
+                    "unhealthy",
+                    2,
+                    failed
+                ),
+                entry("default", "", "unhealthy", 3, failed),
+                entry("starting", "", "unhealthy", 1, r#"[{"ExitCode":1}]"#),
+                entry("nolog", "", "unhealthy", 0, "null"),
+                entry("healthy", "", "healthy", 0, ok),
+            ]
+            .join(",")
+        );
+        let causes = parse_unhealthy_causes(&json).expect("valid");
+        let expected = [
+            ("default", UnhealthyCause::Failed),
+            ("flaky", UnhealthyCause::PausedHealthy),
+            ("fresh", UnhealthyCause::PausedHealthy),
+            ("nolog", UnhealthyCause::PausedStarting),
+            ("starting", UnhealthyCause::PausedStarting),
+            ("strict", UnhealthyCause::Failed),
+            ("zero", UnhealthyCause::PausedHealthy),
+        ];
+        assert_eq!(
+            causes,
+            expected
+                .into_iter()
+                .map(|(name, cause)| (name.to_owned(), cause))
+                .collect::<BTreeMap<_, _>>()
+        );
+        assert!(parse_unhealthy_causes("").expect("valid").is_empty());
     }
 
     #[test]

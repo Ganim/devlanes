@@ -363,6 +363,26 @@ Show CPU and memory per lane and unit
 devlanes debug top [OPTIONS]
 ```
 
+### devlanes debug freeze
+
+Freeze this lane's processes and own containers now, as if it had been idle for `lanes.freeze_after`
+
+```text
+devlanes debug freeze [OPTIONS] [LANE]
+```
+
+- `[LANE]`: Lane to freeze ([project@]lane) [default: the current lane]
+
+### devlanes debug thaw
+
+Resume a throttled or frozen lane
+
+```text
+devlanes debug thaw [OPTIONS] [LANE]
+```
+
+- `[LANE]`: Lane to thaw ([project@]lane) [default: the current lane]
+
 ### devlanes debug bundle
 
 Write a redacted archive to attach to a bug report and print its path.

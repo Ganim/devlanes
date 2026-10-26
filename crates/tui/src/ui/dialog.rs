@@ -160,6 +160,51 @@ fn window(len: usize, selected: usize, room: usize) -> usize {
     selected.saturating_sub(room / 2).min(len - room)
 }
 
+/// The glyph legend as a grid in as many columns as fit `max` cells, four at
+/// most: three lines on a wide screen, so the keys below still fit 60 rows,
+/// and one more line for each column a narrow screen drops.
+fn legend_lines(legend: &[(&'static str, Style, &'static str)], max: usize) -> Vec<Line<'static>> {
+    const GAP: usize = 2;
+    let widths = |columns: usize| -> Vec<usize> {
+        (0..columns)
+            .map(|column| {
+                legend
+                    .iter()
+                    .skip(column)
+                    .step_by(columns)
+                    .map(|(_, _, word)| text::width(word))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect()
+    };
+    // Two cells of indent, then `glyph word` per entry.
+    let total = |widths: &[usize]| {
+        2 + widths.iter().map(|width| width + 2).sum::<usize>()
+            + GAP * widths.len().saturating_sub(1)
+    };
+    let columns = (1..=4)
+        .rev()
+        .find(|columns| total(&widths(*columns)) <= max)
+        .unwrap_or(1);
+    let widths = widths(columns);
+    legend
+        .chunks(columns)
+        .map(|row| {
+            let mut line = vec![Span::raw("  ")];
+            for (index, (glyph, style, word)) in row.iter().enumerate() {
+                line.push(Span::styled(format!("{glyph} "), *style));
+                line.push(Span::raw(if index + 1 < row.len() {
+                    format!("{word:<width$}", width = widths[index] + GAP)
+                } else {
+                    (*word).to_owned()
+                }));
+            }
+            fit(line, max)
+        })
+        .collect()
+}
+
 /// `key action   key action`: the keys bold, the labels dim.
 fn keys(theme: &Theme, pairs: &[(&str, &str)]) -> Line<'static> {
     let mut spans = Vec::new();
@@ -470,6 +515,12 @@ pub fn render(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
                     theme.tone(Tone::Ok),
                     "running (no ready check)",
                 ),
+                (theme.glyph(Glyph::Throttled), theme.quiet(), "throttled"),
+                (
+                    theme.glyph(Glyph::Frozen),
+                    theme.tone(Tone::Frozen),
+                    "frozen",
+                ),
                 (
                     theme.glyph(Glyph::Stopped),
                     theme.quiet(),
@@ -491,14 +542,7 @@ pub fn render(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
                 (theme.glyph(Glyph::Bar), Style::new(), "the unit's color"),
             ];
             let mut body = vec![Line::styled("glyphs", theme.quiet())];
-            for pair in legend.chunks(3) {
-                let mut line = vec![Span::raw("  ")];
-                for (glyph, style, word) in pair {
-                    line.push(Span::styled(format!("{glyph} "), *style));
-                    line.push(Span::raw(format!("{word:<26}")));
-                }
-                body.push(fit(line, max));
-            }
+            body.extend(legend_lines(&legend, max));
             for (name, pairs) in sections {
                 if !body.is_empty() {
                     body.push(Line::from(""));

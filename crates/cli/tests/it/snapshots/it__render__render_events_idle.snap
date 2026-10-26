@@ -1,0 +1,28 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+lane.idle acme@2 throttled
+lane.idle acme@2 frozen
+lane.thawed acme@2 from frozen by a request
+lane.idle_failed acme@0 frozen: api: operation not permitted
+unit.changed acme@2:api ready frozen
+lane.thawed acme@0 from throttled by a stop
+lane.idle_failed acme@2 thaw: api: no such process
+--- plain (exit 0)
+lane.idle acme@2 throttled
+lane.idle acme@2 frozen
+lane.thawed acme@2 from frozen by a request
+lane.idle_failed acme@0 frozen: api: operation not permitted
+unit.changed acme@2:api ready frozen
+lane.thawed acme@0 from throttled by a stop
+lane.idle_failed acme@2 thaw: api: no such process
+--- agent (exit 0)
+lane.idle acme@2 throttled
+lane.idle acme@2 frozen
+lane.thawed acme@2 from frozen by a request
+lane.idle_failed acme@0 frozen: api: operation not permitted
+unit.changed acme@2:api ready frozen
+lane.thawed acme@0 from throttled by a stop
+lane.idle_failed acme@2 thaw: api: no such process

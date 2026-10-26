@@ -1,5 +1,5 @@
 use std::io;
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 use devlanes_sys_windows::proc::{self, Held, Terminated};
@@ -54,6 +54,38 @@ fn listeners_of_this_process() -> io::Result<()> {
         assert!(found.contains(&(me, addr)), "{addr} in {found:?}");
     }
     assert!(proc::listening_tcp(&[])?.is_empty());
+    Ok(())
+}
+
+/// A connection to a listener that never accepts is established on both
+/// families, seen from each end.
+#[test]
+fn established_connections_without_accept() -> io::Result<()> {
+    let v4 = TcpListener::bind("127.0.0.1:0")?;
+    let v6 = TcpListener::bind("[::1]:0")?;
+    let clients = [
+        TcpStream::connect(v4.local_addr()?)?,
+        TcpStream::connect(v6.local_addr()?)?,
+    ];
+    let found = proc::established_tcp()?;
+    for (listener, client) in [&v4, &v6].into_iter().zip(&clients) {
+        let (server, local) = (listener.local_addr()?, client.local_addr()?);
+        assert!(
+            found.contains(&(local, server)),
+            "{local} to {server}: {found:?}"
+        );
+        assert!(
+            found.contains(&(server, local)),
+            "{server} from {local}: {found:?}"
+        );
+    }
+    // Listeners have no remote end and are not listed.
+    assert!(
+        !found
+            .iter()
+            .any(|(_, remote)| remote.port() == 0 || remote.ip().is_unspecified()),
+        "{found:?}"
+    );
     Ok(())
 }
 

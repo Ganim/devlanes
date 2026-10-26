@@ -166,6 +166,8 @@ pub struct ServiceLayout {
     pub literal_port: bool,
     pub hidden: bool,
     pub autostart: bool,
+    /// Evaluated `keep_awake`: while this unit runs, its lane is never throttled or frozen.
+    pub keep_awake: bool,
     pub tags: Vec<String>,
     /// Palette name from [`devlanes_core::color::unit_color`].
     pub color: String,
@@ -360,6 +362,8 @@ pub struct ResolvedService {
     pub pty: bool,
     pub autostart: bool,
     pub hidden: bool,
+    /// See [`ServiceLayout::keep_awake`].
+    pub keep_awake: bool,
     pub tags: Vec<String>,
     /// Palette name from [`devlanes_core::color::unit_color`].
     pub color: String,

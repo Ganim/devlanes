@@ -152,6 +152,8 @@ pub(crate) struct UnitRec {
     pub ready_check: Option<&'static str>,
     /// `UnitSummary.role`.
     pub role: &'static str,
+    /// `services.<name>.keep_awake`: the lane never goes idle while this runs.
+    pub keep_awake: bool,
 }
 
 impl UnitRec {
@@ -263,6 +265,52 @@ pub(crate) struct LaneSt {
     pub sweeping: bool,
     /// When a sweep first saw the folder gone; cleared once it is back.
     pub missing_since: Option<std::time::Instant>,
+    /// Set while the idle loop has the lane's processes throttled or frozen.
+    pub power: Option<LanePowerSt>,
+}
+
+/// A throttled or frozen lane, for its summary.
+#[derive(Debug, Clone)]
+pub(crate) struct LanePowerSt {
+    pub level: devlanes_core::Power,
+    /// When the lane reached `level` (Unix ms).
+    pub since_ms: u64,
+    /// The last activity, in the idle board's monotonic ms, that the change of
+    /// level took into account; anything newer thaws the lane.
+    pub seen: u64,
+    /// The last activity before the lane went idle: Unix ms and its kind word.
+    pub last_activity: Option<(u64, &'static str)>,
+    /// Per-lane containers paused with the freeze, unpaused first on thaw.
+    pub paused_containers: bool,
+}
+
+impl LanePowerSt {
+    /// The protocol form for `LaneSummary.power`.
+    pub(crate) fn summary(&self) -> devlanes_proto::LanePower {
+        devlanes_proto::LanePower {
+            level: self.level.word().into(),
+            since_ms: self.since_ms,
+            last_activity_ms: self.last_activity.map(|(ms, _)| ms),
+            last_activity: self.last_activity.map(|(_, kind)| kind.into()),
+        }
+    }
+}
+
+/// Stable words for power levels in summaries and events.
+pub(crate) trait PowerWord {
+    /// `normal`, `throttled` or `frozen`.
+    fn word(self) -> &'static str;
+}
+
+impl PowerWord for devlanes_core::Power {
+    /// `normal`, `throttled` or `frozen`.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Throttled => "throttled",
+            Self::Frozen => "frozen",
+        }
+    }
 }
 
 /// Marks a worktree identity as an extra lane of another worktree's folder:
@@ -317,6 +365,7 @@ impl LaneSt {
             wanted: false,
             sweeping: false,
             missing_since: None,
+            power: None,
         }
     }
 
@@ -464,6 +513,9 @@ pub(crate) struct LaneRt {
     pub publish: Mutex<()>,
     /// Stops the config watcher when the lane goes away.
     pub watch: tokio_util::sync::CancellationToken,
+    /// Serializes freezing, throttling and thawing of the lane. Taken after `op`
+    /// when both are needed, never before.
+    pub power: tokio::sync::Mutex<()>,
 }
 
 impl LaneRt {
@@ -894,6 +946,7 @@ pub(crate) fn unit_summary(lane: &str, name: &str, unit: &UnitRec) -> UnitSummar
             .iter()
             .find(|url| url.starts_with("https://"))
             .cloned(),
+        power: None,
     }
 }
 
@@ -994,9 +1047,15 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
             units.push(unit_summary(&reference, name, unit));
         }
     }
+    let power = lane.power.as_ref().map(|power| power.level.word());
     for summary in &mut units {
         apply_phase_reason(lane, summary);
         apply_order(lane, summary);
+        // Only supervised processes are throttled or frozen; orphans and finished
+        // units keep their own state word.
+        if summary.state == "ready" && lane.units.contains_key(&summary.name) {
+            summary.power = power.map(str::to_owned);
+        }
     }
     let missing =
         (!lane.present).then(|| RpcError::new("worktree_missing", json!({"path": lane.path}), 3));
@@ -1039,12 +1098,13 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
         reason,
         needs_env: lane.needs_env(),
         containers: container_summaries(lane),
+        power: lane.power.as_ref().map(LanePowerSt::summary),
     }
 }
 
 /// Containers from the lane's infra namespace (`{name: {port, ports}}`), set while
 /// its infra is up, with `infra.hidden` applied.
-fn container_summaries(lane: &LaneSt) -> Vec<devlanes_proto::ContainerSummary> {
+pub(crate) fn container_summaries(lane: &LaneSt) -> Vec<devlanes_proto::ContainerSummary> {
     let Some(Value::Object(namespace)) = &lane.infra_ns else {
         return Vec::new();
     };

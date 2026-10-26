@@ -19,6 +19,13 @@ ports:
 # <data_dir>/<project>/<lane id>. Absolute or starting with ~/; default ~/.devlanes/data.
 lanes:
   data_dir: ~/.devlanes/data
+  # Lower the priority of a lane's processes after this long without activity
+  # (macOS and Windows only). Must be shorter than freeze_after; 0s turns it off.
+  throttle_after: 5m
+  # Suspend a lane's processes and pause its own containers after this long without
+  # activity; the next request, connection or command resumes them. 0s turns it off.
+  # A service with keep_awake: true keeps its lane awake.
+  freeze_after: 15m
 tls:
   # Certificate authority: devlanes keeps its own under ~/.devlanes/ca; mkcert reuses mkcert's.
   ca: devlanes

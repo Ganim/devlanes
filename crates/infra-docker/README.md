@@ -53,6 +53,7 @@ async fn start_cerbos() -> Result<(), Error> {
 ## API
 
 - `DockerInfra`: `ensure`, `health`, `wait_healthy`, `list_managed`, `stop`, `remove_lane`, `events`, `project_events`, `logs`.
+- `DockerInfra::pause_lane` / `unpause_lane`: pause or unpause a frozen lane's own containers and return how many changed; shared containers are never touched.
 - `LogOptions` / `LogChunk`: a container's stdout and stderr as a stream of chunks, with optional tail, follow, since and timestamps.
 - `ContainerSpec`: an evaluated `infra.containers` entry with host ports already taken from the block.
 - `Ensured`: the action taken (`Created`, `Started`, `Adopted`, `Recreated`), the endpoint and the health.
@@ -88,6 +89,8 @@ Containers are named `devlanes-<project>[-lane<N>]-<name>` and labelled `dev.dev
 Relative volume paths resolve against `base_dir`: the lane's worktree for per-lane containers, the primary worktree for shared ones. Named volumes are created with labels and namespaced per project and lane, so `remove_lane` deletes only that lane's data.
 
 Health comes from the image healthcheck when there is one, otherwise from a tcp probe of the first tcp port. The probe ignores connections that a Docker port proxy accepts and then closes.
+
+Docker stops healthchecks while a container is paused and marks it `unhealthy` without sending an event. After the unpause it stays `unhealthy` until the next check runs. `health` counts it as unhealthy only when its failing streak has reached the healthcheck's retries. Below that it reads `Healthy` when a check passed before the pause and `Starting` otherwise, so `ensure` right after a thaw neither fails nor waits for the next check. `ensure` also unpauses a paused lane container before adopting it.
 
 `DockerInfra::connect` resolves the engine like the `docker` CLI: `DOCKER_HOST`, then `DOCKER_CONTEXT` or `currentContext` from the Docker config directory. bollard alone only reads `DOCKER_HOST`, which misses OrbStack and Colima contexts.
 

@@ -10,8 +10,8 @@ use tokio::sync::{OnceCell, OwnedMutexGuard};
 
 use crate::{
     Error, NameConflict,
-    cli::{ComposeCli, ComposeProject, ExistingContainer, UpOptions},
-    model::{ComposeModel, Health, service_containers, service_health},
+    cli::{ComposeCli, ComposeProject, ExistingContainer, UnhealthyCause, UpOptions},
+    model::{ComposeModel, ContainerStatus, Health, service_containers, service_health},
     overrides::{render_override, write_override},
     ports::{Endpoints, LanePorts, PortBlock, PortRequest, endpoints_from_ps, port_requests},
     version::ComposeVersion,
@@ -19,6 +19,10 @@ use crate::{
 
 /// Compose's own project label, present on every container it creates.
 const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+/// Bound on one `pause` or `unpause` call; the engine answers in milliseconds.
+const PAUSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Pause between checks while an unpaused container waits for its next healthcheck.
+const SETTLE_POLL: Duration = Duration::from_millis(500);
 
 /// The shared compose project of a devlanes project, run from the primary worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,21 +264,63 @@ impl Compose {
         let rendered =
             render_override(&lane.project, lane.lane, &services, &requests, ports, block)?;
         let override_path = write_override(&lane.state_dir, &rendered.yaml).await?;
+        // Services kept running through an unpause, which Docker still calls unhealthy.
+        let mut resumed_up = BTreeSet::new();
         if !services.is_empty() {
-            self.cli
-                .up(
-                    &project,
-                    std::slice::from_ref(&override_path),
-                    &services,
-                    true,
-                    options,
-                )
-                .await?;
+            let extra = std::slice::from_ref(&override_path);
+            let before = self.cli.ps(&name).await?;
+            // Compose refuses to start paused containers, so a lane whose thaw
+            // failed would not start otherwise.
+            let unpaused = self.change_pause_from(&name, false, &before).await?;
+            let suspect = unpaused > 0
+                || before
+                    .iter()
+                    .any(|status| status.state == "running" && status.health == "unhealthy");
+            let resumed = if suspect {
+                self.resumed_services(&name, &services, options.wait_timeout)
+                    .await?
+            } else {
+                BTreeMap::new()
+            };
+            let waited: Vec<String> = services
+                .iter()
+                .filter(|service| !resumed.contains_key(*service))
+                .cloned()
+                .collect();
+            self.cli.up(&project, extra, &waited, true, options).await?;
+            if !resumed.is_empty() {
+                // `up --wait` would fail on the `unhealthy` that Docker reports until
+                // the next check, so these come up without it.
+                let names: Vec<String> = resumed.keys().cloned().collect();
+                self.cli
+                    .up_no_wait(&project, extra, &names, true, options)
+                    .await?;
+                // `up` replaces a container whose config changed, and a new one has to
+                // pass its checks like any other.
+                let after = self.cli.ps(&name).await?;
+                let (kept, replaced): (Vec<_>, Vec<_>) = resumed
+                    .into_iter()
+                    .partition(|(service, ids)| container_ids(&after, service) == *ids);
+                let replaced: Vec<String> =
+                    replaced.into_iter().map(|(service, _)| service).collect();
+                self.cli
+                    .up(&project, extra, &replaced, true, options)
+                    .await?;
+                resumed_up.extend(kept.into_iter().map(|(service, _)| service));
+            }
         }
         let statuses = self.cli.ps(&name).await?;
+        let mut health = service_health(&services, &statuses);
+        for service in &resumed_up {
+            if let Some(entry) = health.get_mut(service)
+                && *entry == Health::Unhealthy
+            {
+                *entry = Health::Healthy;
+            }
+        }
         Ok(LaneReport {
             project: name,
-            health: service_health(&services, &statuses),
+            health,
             containers: service_containers(&services, &statuses),
             warnings: volume_warnings(&model, &services),
             services,
@@ -314,6 +360,31 @@ impl Compose {
         self.cli.stop(&name, timeout).await
     }
 
+    /// Pauses the lane project's running containers while the lane is frozen. The
+    /// shared project is never touched. Returns how many containers were running
+    /// before the pause; 0 when the lane project has none.
+    pub async fn lane_pause(&self, project: &str, lane: u32) -> Result<usize, Error> {
+        let name = lane_project_name(project, lane)?;
+        // Keeps a pause out of a running `up --wait`, which would fail on it.
+        let _guard = self.locks.lock(&name).await;
+        let statuses = self.cli.ps(&name).await?;
+        self.change_pause_from(&name, true, &statuses).await
+    }
+
+    /// Unpauses the lane project's paused containers. Returns how many were paused
+    /// before the call; 0 when none were.
+    ///
+    /// Docker reports an unpaused container with a healthcheck `unhealthy` until its
+    /// next check runs, without sending an event. [`Self::lane_up`] treats one that
+    /// was healthy before the pause as up.
+    pub async fn lane_unpause(&self, project: &str, lane: u32) -> Result<usize, Error> {
+        let name = lane_project_name(project, lane)?;
+        // No project lock: a thaw must not queue behind a long `up`, and unpausing
+        // during one only helps it.
+        let statuses = self.cli.ps(&name).await?;
+        self.change_pause_from(&name, false, &statuses).await
+    }
+
     /// Removes the lane project's containers, networks and named volumes (lane clean).
     /// Works by name, so it also cleans lanes whose worktree is gone.
     pub async fn lane_down(
@@ -325,6 +396,103 @@ impl Compose {
         let name = lane_project_name(project, lane)?;
         let _guard = self.locks.lock(&name).await;
         self.cli.down(&name, true, timeout).await
+    }
+
+    /// Pauses (or unpauses) the services of compose project `name` that have a
+    /// container in the opposite state according to `statuses`, from `ps`, and
+    /// returns how many containers that was.
+    async fn change_pause_from(
+        &self,
+        name: &str,
+        pause: bool,
+        statuses: &[ContainerStatus],
+    ) -> Result<usize, Error> {
+        let from = if pause { "running" } else { "paused" };
+        let selected: Vec<&ContainerStatus> = statuses
+            .iter()
+            .filter(|status| status.state == from)
+            .collect();
+        let services: Vec<String> = selected
+            .iter()
+            .map(|status| status.service.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let result = if pause {
+            self.cli.pause(name, &services, PAUSE_TIMEOUT).await
+        } else {
+            self.cli.unpause(name, &services, PAUSE_TIMEOUT).await
+        };
+        if let Err(error) = result {
+            // Compose fails the whole call when one container changed state after
+            // `ps`, such as a replica already paused. Only a container still in the
+            // old state means the call did not do its job.
+            let left = self.cli.ps(name).await?;
+            if left
+                .iter()
+                .any(|status| status.state == from && services.contains(&status.service))
+            {
+                return Err(error);
+            }
+        }
+        Ok(selected.len())
+    }
+
+    /// The `services` of compose project `name` that count as up right after an
+    /// unpause, with the ids of their containers: each container runs and is healthy,
+    /// has no healthcheck, or was healthy when it was paused, and at least one was
+    /// paused. Containers paused before their first passing check have nothing to go
+    /// on, so this waits up to `timeout` for their next check first, since `up --wait`
+    /// fails at once on them.
+    async fn resumed_services(
+        &self,
+        name: &str,
+        services: &[String],
+        timeout: Duration,
+    ) -> Result<BTreeMap<String, BTreeSet<String>>, Error> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let statuses: Vec<ContainerStatus> = self
+                .cli
+                .ps(name)
+                .await?
+                .into_iter()
+                .filter(|status| services.contains(&status.service))
+                .collect();
+            let unhealthy: Vec<String> = statuses
+                .iter()
+                .filter(|status| status.state == "running" && status.health == "unhealthy")
+                .map(|status| status.name.clone())
+                .collect();
+            let causes = self.cli.unhealthy_causes(&unhealthy).await?;
+            let starting = causes
+                .values()
+                .any(|cause| *cause == UnhealthyCause::PausedStarting);
+            if starting && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(SETTLE_POLL).await;
+                continue;
+            }
+            let paused_healthy = |status: &ContainerStatus| {
+                causes.get(&status.name) == Some(&UnhealthyCause::PausedHealthy)
+            };
+            let mut resumed = BTreeMap::new();
+            for service in services {
+                let containers: Vec<&ContainerStatus> = statuses
+                    .iter()
+                    .filter(|status| &status.service == service)
+                    .collect();
+                let up = containers.iter().all(|status| {
+                    status.state == "running"
+                        && (status.health == "healthy"
+                            || status.health.is_empty()
+                            || paused_healthy(status))
+                });
+                if up && containers.iter().any(|status| paused_healthy(status)) {
+                    resumed.insert(service.clone(), container_ids(&statuses, service));
+                }
+            }
+            return Ok(resumed);
+        }
     }
 
     /// Resolves the lane project from the lane's worktree without the override, so port
@@ -404,6 +572,15 @@ pub fn classify_conflicts(
         }
     }
     (adopted, conflicts)
+}
+
+/// Ids of the containers of `service` in `ps` output.
+fn container_ids(statuses: &[ContainerStatus], service: &str) -> BTreeSet<String> {
+    statuses
+        .iter()
+        .filter(|status| status.service == service)
+        .map(|status| status.id.clone())
+        .collect()
 }
 
 /// `(service, container_name)` for selected services with a fixed name.

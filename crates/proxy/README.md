@@ -28,7 +28,8 @@ async fn serve(shutdown: CancellationToken) -> Result<(), Box<dyn std::error::Er
 - `Proxy::tls_config` and `serve_tls` use a shared CA with HTTP/1.1 and HTTP/2 ALPN.
 - `RouteState` selects the idle, starting, failed and reconnecting pages from `devlanes-pages`.
 - `Proxy::listener_health` reports each accept loop's `ListenerHealth`: whether it is running, its accept error count and the latest error.
-- `Proxy::with_limits` replaces the default `ProxyLimits` (connection cap, header and idle timeouts, how long requests wait for starting services and reconnecting boxes, how long refused connections are retried).
+- `Proxy::with_limits` replaces the default `ProxyLimits` (connection cap, header and idle timeouts, how long requests wait for starting services, reconnecting boxes and thawing lanes, how long refused connections are retried).
+- `LaneActivity`, set as `ProxyConfig::activity`, hears about forwarded requests and client bytes on upgraded streams per route owner, and can hold a request until the lane thaws (at most `thaw_wait`).
 
 ## Config example
 

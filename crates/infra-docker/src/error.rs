@@ -67,4 +67,45 @@ impl Error {
             })
         )
     }
+
+    /// A pause or unpause that lost a race: the container is gone (404), already
+    /// paused or no longer running (409), or not paused. Docker answers the last
+    /// one with a plain 500, so only its message tells it apart.
+    pub(crate) fn is_state_race(&self) -> bool {
+        match self {
+            Error::Docker(bollard::errors::Error::DockerResponseServerError {
+                status_code,
+                message,
+            }) => {
+                matches!(status_code, 404 | 409)
+                    || (*status_code == 500 && message.ends_with("is not paused"))
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An Engine API error response with `status_code` and `message`.
+    fn response(status_code: u16, message: &str) -> Error {
+        Error::Docker(bollard::errors::Error::DockerResponseServerError {
+            status_code,
+            message: message.into(),
+        })
+    }
+
+    /// Lost pause and unpause races count as success; other errors do not.
+    #[test]
+    fn pause_races_are_recognised() {
+        // Messages as Docker 29 sends them.
+        assert!(response(404, "No such container: x").is_state_race());
+        assert!(response(409, "container abc is already paused").is_state_race());
+        assert!(response(409, "container abc is not running").is_state_race());
+        assert!(response(500, "Container abc is not paused").is_state_race());
+        assert!(!response(500, "cannot pause: permission denied").is_state_race());
+        assert!(!Error::UnknownContext("x".into()).is_state_race());
+    }
 }

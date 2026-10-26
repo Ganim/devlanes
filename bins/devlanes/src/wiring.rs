@@ -115,7 +115,8 @@ pub async fn engine(
     let (ca_env, ca_status, ca) =
         certificate_authority(&paths.home, user.tls.ca, ca_tld.as_deref()).await;
     let ca_permitted = ca.as_ref().and_then(|ca| ca.permitted_dns_names());
-    let routes = Arc::new(proxy(&user, ca, shutdown.clone()).await);
+    let idle = Arc::new(devlanes_daemon::idle::IdleBoard::default());
+    let routes = Arc::new(proxy(&user, ca, idle.clone(), shutdown.clone()).await);
     let infra = Arc::new(ContainerInfra::new().await);
     #[cfg(unix)]
     let mut integ = Integrations::with_runner(Arc::new(PtyUnits(
@@ -177,6 +178,7 @@ pub async fn engine(
     options.logs = paths.logs.clone();
     // A service manager would not start the daemon again, so only a spawned one exits.
     options.idle_exit = (spawned && user.daemon.exit_when_idle).then_some(IDLE_EXIT_GRACE);
+    options.idle = idle;
     options.user = user;
     let engine: Arc<dyn Handler> = Arc::new(Engine::new(options, store, integ, shutdown));
     Ok(engine)
@@ -620,6 +622,7 @@ async fn certificate_authority_with(
 async fn proxy(
     user: &devlanes_config::UserConfig,
     ca: Option<Arc<devlanes_pki::CertificateAuthority>>,
+    idle: Arc<devlanes_daemon::idle::IdleBoard>,
     shutdown: CancellationToken,
 ) -> ProxyRoutes {
     let lan = user.proxy.lan;
@@ -648,6 +651,7 @@ async fn proxy(
         lan,
         https_redirect_port: https.as_ref().map(|l| l.port),
         via: user.proxy.via,
+        activity: Some(Arc::new(LaneActivity(idle))),
         ..devlanes_proxy::ProxyConfig::default()
     };
     let proxy = devlanes_proxy::Proxy::new(config, devlanes_proxy::RouteTable::default());
@@ -705,6 +709,24 @@ async fn proxy(
         proxy,
         status: Value::Object(status),
         rejected: Mutex::new(Vec::new()),
+    }
+}
+
+/// Reports proxy traffic to the idle lanes board, which thaws frozen lanes.
+struct LaneActivity(Arc<devlanes_daemon::idle::IdleBoard>);
+
+impl devlanes_proxy::LaneActivity for LaneActivity {
+    /// Records the request; for a frozen lane, waits until it runs again.
+    fn request(
+        &self,
+        owner: &str,
+    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+        self.0.request(owner)
+    }
+
+    /// Records client bytes on an upgraded stream.
+    fn stream(&self, owner: &str) {
+        self.0.stream(owner);
     }
 }
 
@@ -933,6 +955,12 @@ impl devlanes_daemon::integrations::ProcessTable for WindowsProcesses {
             .await;
     }
 
+    /// Delegates: a verified resume. A unit's recorded members are every
+    /// process of its job but the leader, so resuming each covers the unit.
+    async fn resume(&self, identity: ProcessIdentity) {
+        devlanes_daemon::integrations::ProcessTable::resume(&SysProcesses, identity).await;
+    }
+
     /// See [`devlanes_runner_windows::stop_orphan`].
     async fn terminate_unit(
         &self,
@@ -1009,6 +1037,10 @@ impl Unit for WindowsManaged {
     /// Delegates: true for `pty: true` units, which run in a pseudo console.
     fn renders_screen(&self) -> bool {
         self.0.renders_screen()
+    }
+    /// Delegates.
+    async fn set_power(&self, power: devlanes_core::Power) -> Result<(), devlanes_core::Error> {
+        self.0.set_power(power).await
     }
 }
 
@@ -1110,6 +1142,10 @@ impl Unit for PtyManaged {
     /// Delegates.
     async fn subjects(&self) -> Result<Vec<ProcessIdentity>, devlanes_core::Error> {
         self.0.subjects().await
+    }
+    /// Delegates.
+    async fn set_power(&self, power: devlanes_core::Power) -> Result<(), devlanes_core::Error> {
+        self.0.set_power(power).await
     }
 }
 
@@ -1270,6 +1306,28 @@ fn compose_base_env(vars: impl Iterator<Item = (String, String)>) -> BTreeMap<St
             })
     })
     .collect()
+}
+
+/// Containers a pause or unpause changed through Compose and the Engine API
+/// together. Without Docker nothing changed. An error is returned only when
+/// nothing changed, so one failing side does not hide what the other did.
+fn changed_containers(
+    compose: Result<usize, InfraError>,
+    docker: Result<usize, InfraError>,
+) -> Result<usize, InfraError> {
+    let mut changed = 0;
+    let mut failure = None;
+    for result in [compose, docker] {
+        match result {
+            Ok(count) => changed += count,
+            Err(error) if error.code == "docker_unavailable" => {}
+            Err(error) => failure = failure.or(Some(error)),
+        }
+    }
+    match failure {
+        Some(error) if changed == 0 => Err(error),
+        _ => Ok(changed),
+    }
 }
 
 /// Compose failures; a missing `docker` binary means Docker is unavailable.
@@ -1849,6 +1907,40 @@ impl InfraProvider for ContainerInfra {
             }
         }
         Ok(Value::Object(report))
+    }
+
+    /// Pauses the lane's own compose services and plain containers.
+    async fn pause_lane(&self, project: &str, lane: u32) -> Result<usize, InfraError> {
+        let compose = self
+            .compose
+            .lane_pause(project, lane)
+            .await
+            .map_err(compose_error);
+        let docker = match &self.docker {
+            Some(docker) => docker
+                .pause_lane(project, lane)
+                .await
+                .map_err(docker_error("pause")),
+            None => Ok(0),
+        };
+        changed_containers(compose, docker)
+    }
+
+    /// Unpauses the lane's own compose services and plain containers.
+    async fn unpause_lane(&self, project: &str, lane: u32) -> Result<usize, InfraError> {
+        let compose = self
+            .compose
+            .lane_unpause(project, lane)
+            .await
+            .map_err(compose_error);
+        let docker = match &self.docker {
+            Some(docker) => docker
+                .unpause_lane(project, lane)
+                .await
+                .map_err(docker_error("unpause")),
+            None => Ok(0),
+        };
+        changed_containers(compose, docker)
     }
 
     /// Stdout and stderr of any container through the Engine API.

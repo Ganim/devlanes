@@ -46,6 +46,40 @@ fn service_mappings_merge_per_key() {
     }
 }
 
+/// `keep_awake` is inherited through `extends`, replaced by the service and by
+/// devlanes.local.yaml, and may be an expression.
+#[test]
+fn keep_awake_merges_like_other_flags() {
+    let source = "project: demo\ntemplates:\n  worker:\n    keep_awake: true\nservices:\n  jobs:\n    extends: worker\n    run: jobs\n  cron:\n    extends: worker\n    run: cron\n    keep_awake: false\n  api:\n    run: api\n    keep_awake: '${{ lane.index == 0 }}'\n  web:\n    run: web\n";
+    let config = parse_project(source, None).expect("valid");
+    let flag = |name: &str| config.services[name].keep_awake.clone();
+    assert_eq!(flag("jobs"), Some(Templated::Literal(true)));
+    assert_eq!(flag("cron"), Some(Templated::Literal(false)));
+    assert_eq!(
+        flag("api"),
+        Some(Templated::Expression("${{ lane.index == 0 }}".into()))
+    );
+    assert_eq!(flag("web"), None);
+
+    let local = "services:\n  jobs:\n    keep_awake: false\n  web:\n    keep_awake: true\n";
+    let config = parse_project(source, Some(local)).expect("local overrides");
+    assert_eq!(
+        config.services["jobs"].keep_awake,
+        Some(Templated::Literal(false))
+    );
+    assert_eq!(
+        config.services["web"].keep_awake,
+        Some(Templated::Literal(true))
+    );
+    assert!(
+        parse_project(
+            "project: demo\nservices:\n  a: { run: a, keep_awake: often }\n",
+            None
+        )
+        .is_err()
+    );
+}
+
 /// Setting one form of a command or readiness check drops the inherited alternatives.
 #[test]
 fn alternative_forms_clear_siblings() {

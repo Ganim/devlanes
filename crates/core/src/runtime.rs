@@ -67,6 +67,22 @@ impl Default for StopPolicy {
     }
 }
 
+/// How much CPU an idle unit may use. The daemon lowers it for lanes without
+/// activity and raises it back on the next request, connection or command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Power {
+    /// Runs as started.
+    #[default]
+    Normal,
+    /// Runs at background priority: lower CPU priority, throttled I/O and, where
+    /// the OS has them, efficiency cores. Still serves requests.
+    Throttled,
+    /// Suspended: no thread runs until the unit is set back to `Normal`. Memory,
+    /// open sockets and PIDs stay, and the kernel keeps queuing new connections.
+    Frozen,
+}
+
 /// How pipe-mode units (`pty: false`) deliver stderr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StderrMode {
@@ -160,6 +176,13 @@ pub trait Unit: Send + Sync {
     fn output(&self) -> broadcast::Receiver<OutputChunk>;
     /// Returns the leader and known descendants with PID-reuse-resistant identities.
     async fn subjects(&self) -> Result<Vec<ProcessIdentity>, Error>;
+    /// Moves the unit's process tree to `power`. `Normal` undoes both other levels.
+    /// A stop must still work on a `Frozen` unit. Runners without the mechanism
+    /// return `Unsupported`, and an exited unit returns `Exited`.
+    async fn set_power(&self, power: Power) -> Result<(), Error> {
+        let _ = power;
+        Err(Error::Unsupported("power levels".into()))
+    }
     /// Whether the output is a rendering of the unit's terminal rather than
     /// what its programs wrote: text placed with absolute cursor moves for the
     /// terminal's current size, as a console host that redraws its own screen

@@ -12,6 +12,7 @@ use std::{
 use devlanes_infra_docker::{
     ContainerSpec, DockerInfra, EnsureAction, EnsureOptions, Error, EventKind, Health, LogChunk,
     LogOptions, LogStream, NamedPort, PortBlock, Protocol, Scope, container_name, labels,
+    scope_labels,
 };
 use futures_util::StreamExt;
 
@@ -238,6 +239,126 @@ async fn docker_events_report_lifecycle() {
             "{kinds:?}"
         );
         assert!(kinds.contains(&EventKind::Stopped), "{kinds:?}");
+    })
+    .await;
+    drop(cleanup);
+}
+
+/// Docker's `State.Status` of `container`.
+fn docker_state(container: &str) -> String {
+    let output = Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Status}}", container])
+        .output()
+        .expect("docker inspect");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Pausing a lane touches only its own containers, a second call changes nothing,
+/// a container that was healthy reads healthy right after the unpause, and
+/// `ensure` brings back a lane container that is still paused.
+#[tokio::test]
+#[ignore = "needs docker"]
+async fn docker_lane_pause_unpause() {
+    let project = unique_project();
+    let checked = format!("{project}-checked");
+    let cleanup = Cleanup {
+        project: project.clone(),
+        names: vec![checked.clone()],
+    };
+    bounded(async {
+        let base = tempfile::tempdir().expect("tempdir");
+        let infra = DockerInfra::connect().await.expect("connect");
+        let options = EnsureOptions::default();
+        let mut names = BTreeMap::new();
+        let mut specs = BTreeMap::new();
+        for (key, scope) in [
+            ("cache", Scope::Lane(1)),
+            ("other", Scope::Lane(2)),
+            ("shared", Scope::Shared),
+        ] {
+            let mut spec = redis_spec(&project, key, scope, base.path());
+            spec.volumes.clear();
+            let ensured = infra.ensure(&spec, options).await.expect("ensure");
+            names.insert(key, ensured.container_name);
+            specs.insert(key, spec);
+        }
+        // A lane container with a Docker healthcheck, labelled like the ones `ensure`
+        // creates. Checks run every 500 ms until the first one passes, then every
+        // 60 s, so no check runs between the unpause and the assertions after it.
+        let mut run = vec!["run", "-d", "--name", &checked];
+        let labels: Vec<String> = scope_labels(&project, Scope::Lane(1))
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        for label in &labels {
+            run.extend(["--label", label]);
+        }
+        run.extend([
+            "--health-cmd",
+            "redis-cli ping",
+            "--health-interval",
+            "60s",
+            "--health-start-period",
+            "60s",
+            "--health-start-interval",
+            "500ms",
+            IMAGE,
+        ]);
+        let created = Command::new("docker").args(&run).output().expect("run");
+        assert!(created.status.success(), "{created:?}");
+        let health = infra
+            .wait_healthy(&checked, None, Duration::from_secs(60))
+            .await
+            .expect("healthy before the pause");
+        assert_eq!(health, Health::Healthy);
+
+        assert_eq!(infra.pause_lane(&project, 1).await.expect("pause"), 2);
+        assert_eq!(docker_state(&names["cache"]), "paused");
+        assert_eq!(docker_state(&checked), "paused");
+        assert_eq!(docker_state(&names["other"]), "running");
+        assert_eq!(docker_state(&names["shared"]), "running");
+        assert_eq!(infra.pause_lane(&project, 1).await.expect("pause again"), 0);
+        let paused_health = infra.health(&checked, None).await.expect("health");
+        assert_eq!(
+            paused_health,
+            Health::Other {
+                state: "paused".into()
+            }
+        );
+
+        assert_eq!(infra.unpause_lane(&project, 1).await.expect("unpause"), 2);
+        assert_eq!(docker_state(&names["cache"]), "running");
+        assert_eq!(docker_state(&checked), "running");
+        assert_eq!(
+            infra
+                .unpause_lane(&project, 1)
+                .await
+                .expect("unpause again"),
+            0
+        );
+        // Docker reads `unhealthy` until the next check, 60 s away.
+        let docker_health = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Health.Status}}", &checked])
+            .output()
+            .expect("docker inspect");
+        assert_eq!(
+            String::from_utf8_lossy(&docker_health.stdout).trim(),
+            "unhealthy"
+        );
+        let health = infra
+            .wait_healthy(&checked, None, Duration::from_secs(1))
+            .await
+            .expect("healthy right after the unpause");
+        assert_eq!(health, Health::Healthy);
+
+        infra.pause_lane(&project, 1).await.expect("pause");
+        let ensured = infra
+            .ensure(&specs["cache"], options)
+            .await
+            .expect("ensure a paused lane container");
+        assert_eq!(ensured.action, EnsureAction::Adopted);
+        assert_eq!(docker_state(&names["cache"]), "running");
+        assert_eq!(infra.unpause_lane(&project, 1).await.expect("unpause"), 1);
     })
     .await;
     drop(cleanup);

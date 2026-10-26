@@ -10,7 +10,8 @@ const COMPOSE_PROJECT: &str = "com.docker.compose.project";
 const COMPOSE_SERVICE: &str = "com.docker.compose.service";
 
 /// Docker event names worth subscribing to. Healthcheck runs also emit `exec_*` events,
-/// which this filter keeps off the stream.
+/// which this filter keeps off the stream. `pause` and `unpause` are left out: a paused
+/// container keeps its state, and the daemon shows a frozen lane from its own records.
 pub const WATCHED_EVENTS: &[&str] = &[
     "start",
     "restart",

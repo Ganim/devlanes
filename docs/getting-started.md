@@ -49,7 +49,7 @@ devlanes url open web    # open a service in the browser
 devlanes stop            # stop the lane
 ```
 
-The daemon starts on first use or with `devlanes daemon start`, and stops on its own about 30 seconds after the last TUI closes while nothing runs (`daemon.exit_when_idle`). `start` is safe to repeat: running services are left alone.
+The daemon starts on first use or with `devlanes daemon start`, and stops on its own about 30 seconds after the last TUI closes while nothing runs (`daemon.exit_when_idle`). `start` is safe to repeat: running services are left alone. A lane without requests, connections or commands for 15 minutes is frozen, and the next request, connection or command resumes it ([idle lanes](guides/lifecycle.md#idle-lanes)).
 
 On a terminal, `start` opens the TUI on the lane and runs the start inside it: the header shows the phase (infra, setup, tasks, services), the tree shows each service coming up, and a service that fails shows its reason and the end of its log in the details pane. When the start ends, the header keeps the result and the TUI stays open. Quitting keeps services running unless you choose otherwise: while lanes run, `q` asks whether to keep or stop them (`tui.on_quit` in `~/.devlanes/config.yaml` answers for you). The exit status is 0 when the start was ready, 1 when it failed, and 130 when you quit before it ended (the start keeps going in the daemon). A start the daemon refuses outright, such as a worktree without `devlanes.yaml` or an unknown unit, prints its error before any TUI opens. `restart`, `lane resume` and `lane new --start` work the same way.
 
@@ -123,7 +123,7 @@ For more detail in the daemon's log, restart it with a level: `DEVLANES_LOG=debu
 
 - [CLI reference](reference/cli.md): every command and option.
 - [Config reference](reference/config.md): every field of `devlanes.yaml` and the user `config.yaml`.
-- Guides: [run and run_script](guides/run-scripts.md), [languages](guides/languages.md), [framework presets](guides/presets.md), [ports and environment](guides/ports-and-env.md), [hostnames and HTTPS](guides/https.md), [infra](guides/infra.md), [service patterns](guides/services.md), [terminals](guides/terminals.md), [remote setup](guides/remote-setup.md).
+- Guides: [run and run_script](guides/run-scripts.md), [languages](guides/languages.md), [framework presets](guides/presets.md), [ports and environment](guides/ports-and-env.md), [hostnames and HTTPS](guides/https.md), [infra](guides/infra.md), [service patterns](guides/services.md), [lane lifecycle](guides/lifecycle.md), [terminals](guides/terminals.md), [remote setup](guides/remote-setup.md).
 - [Remote boxes](remote.md): run lanes on another machine and use them locally.
 - [Design](design.md): lanes, ports, the daemon and startup order.
 - [Observability](observability.md): the daemon's spans and diagnostics, and plans for tracing and benchmarks.

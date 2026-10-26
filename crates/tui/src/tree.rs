@@ -440,7 +440,7 @@ pub fn counts(lane: &LaneSummary) -> Counts {
     }
     for container in lane.containers.iter().filter(|c| !c.hidden) {
         counts.total += 1;
-        match container_tone(container) {
+        match container_tone(Some(lane), container) {
             ContainerTone::Up => counts.up += 1,
             ContainerTone::Failed => counts.failed += 1,
             ContainerTone::Busy => counts.starting += 1,
@@ -459,10 +459,29 @@ pub enum ContainerTone {
     Down,
 }
 
-/// A container without a state (older daemons) is listed because it runs.
-pub fn container_tone(container: &devlanes_proto::ContainerSummary) -> ContainerTone {
+/// Whether `container` is paused with `lane`: its own containers are while the
+/// lane is frozen, shared ones never are.
+pub fn frozen_with(
+    lane: Option<&LaneSummary>,
+    container: &devlanes_proto::ContainerSummary,
+) -> bool {
+    !container.shared
+        && lane
+            .and_then(|lane| lane.power.as_ref())
+            .is_some_and(|power| power.level == "frozen")
+}
+
+/// How a container stands in `lane`, from `ContainerSummary.state`. A container
+/// without a state (older daemons) is listed because it runs.
+pub fn container_tone(
+    lane: Option<&LaneSummary>,
+    container: &devlanes_proto::ContainerSummary,
+) -> ContainerTone {
     match container.state.as_deref() {
         None | Some("running" | "healthy") => ContainerTone::Up,
+        // The daemon paused it with its frozen lane, which thaws on the next
+        // request; paused by hand, it serves nothing until unpaused.
+        Some("paused") if frozen_with(lane, container) => ContainerTone::Up,
         Some("starting" | "created") => ContainerTone::Busy,
         Some(state) if state == "unhealthy" || state == "oom" || state.starts_with("exited") => {
             ContainerTone::Failed
@@ -516,6 +535,35 @@ mod tests {
             hidden,
             ..ContainerSummary::default()
         }
+    }
+
+    /// A paused container is up only when its own lane is frozen; one paused
+    /// by hand, or a shared one, is not.
+    #[test]
+    fn paused_containers_are_up_only_in_their_frozen_lane() {
+        let paused = |shared| ContainerSummary {
+            state: Some("paused".into()),
+            ..container("db", shared, false)
+        };
+        let mut frozen = lane(Vec::new(), "running");
+        frozen.power = Some(devlanes_proto::LanePower {
+            level: "frozen".into(),
+            ..devlanes_proto::LanePower::default()
+        });
+        let awake = lane(Vec::new(), "running");
+        assert_eq!(
+            container_tone(Some(&frozen), &paused(false)),
+            ContainerTone::Up
+        );
+        assert_eq!(
+            container_tone(Some(&frozen), &paused(true)),
+            ContainerTone::Down
+        );
+        assert_eq!(
+            container_tone(Some(&awake), &paused(false)),
+            ContainerTone::Down
+        );
+        assert_eq!(container_tone(None, &paused(false)), ContainerTone::Down);
     }
 
     #[test]

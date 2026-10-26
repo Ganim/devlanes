@@ -1,11 +1,12 @@
  ┌ keys ──────────────────────────────────────────────────────────────────────┐
  │ glyphs                                                                     │
-┌│   ● ready (check passed)      ◉ running (no ready check)  · stopped, not … │┐
-││   ⠸ starting, stopping        … queued                    ✕ failed       … ││
-││   ◆ orphaned                  ✓ task done                 ▍ the unit's co… ││
+┌│   ● ready (check passed)  ◉ running (no ready check)  z throttled          │┐
+││   ❄ frozen                · stopped, not run          ⠸ starting, stopping ││
+││   … queued                ✕ failed                    ◆ orphaned           ││
+││   ✓ task done             ▍ the unit's color                               ││
 ││                                                                            ││
-││ list                                                                       ││
-││   j k  up down      move; k from the top selects the lane                  │┤
+││ list                                                                       │┤
+││   j k  up down      move; k from the top selects the lane                  ││
 ││   g G               the lane, the last row                                 ││
 ││   h l               fold, unfold; h moves to the section                   ││
 ││   enter  space      fold a section, or type into a running unit            ││
@@ -18,7 +19,6 @@
 ││   C                 clean the lane (asks first)                            ││
 ││   o                 open the unit's address in a browser                   ││
 ││   /                 filter by name or +tag; enter keeps, esc clears        ││
-││                                                                            ││
 ││ …                                                                          ││
 └│ any key closes                                                             │┘
  └────────────────────────────────────────────────────────────────────────────┘
@@ -26,12 +26,12 @@
 --- styles (row: columns style) ---
 0: 1-78 bold
 1: 0 dim, 1 bold, 3-8 dim, 78 bold, 79 dim
-2: 0 darkgray, 1 bold, 5-6 green, 33-34 green, 61-62 dim, 78 bold, 79 darkgray
-3: 0 darkgray, 1 bold, 33-34 dim, 61-62 red, 78 bold, 79 darkgray
-4: 0 darkgray, 1 bold, 5-6 yellow, 33-34 green, 78 bold, 79 darkgray
-5: 0 darkgray, 1 bold, 78 bold, 79 darkgray
-6: 0 darkgray, 1 bold, 3-6 dim, 78 bold, 79 darkgray
-7: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+2: 0 darkgray, 1 bold, 5-6 green, 29-30 green, 57-58 dim, 78 bold, 79 darkgray
+3: 0 darkgray, 1 bold, 5-6 blue, 29-30 dim, 78 bold, 79 darkgray
+4: 0 darkgray, 1 bold, 5-6 dim, 29-30 red, 57-58 yellow, 78 bold, 79 darkgray
+5: 0 darkgray, 1 bold, 5-6 green, 78 bold, 79 darkgray
+6: 0 darkgray, 1 bold, 78 bold, 79 darkgray
+7: 0 darkgray, 1 bold, 3-6 dim, 78 bold, 79 darkgray
 8: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
 9: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
 10: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
@@ -44,7 +44,7 @@
 17: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
 18: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
 19: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
-20: 0 darkgray, 1 bold, 78 bold, 79 darkgray
+20: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
 21: 0 darkgray, 1 bold, 3 dim, 78 bold, 79 darkgray
 22: 0 darkgray, 1 bold, 3-16 dim, 78 bold, 79 darkgray
 23: 1-78 bold, 79 dim

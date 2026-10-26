@@ -298,6 +298,8 @@ services:
       log: Connected to Redis
     # Plain pipes instead of a terminal.
     pty: false
+    # Consumes jobs without inbound requests, so its lane is never throttled or frozen while it runs.
+    keep_awake: true
     # Signal sent on stop, and how long to wait before killing the process tree.
     stop:
       signal: SIGINT

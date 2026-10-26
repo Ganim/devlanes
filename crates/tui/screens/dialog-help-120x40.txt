@@ -1,82 +1,82 @@
- devlanes  1 ac┌ keys ──────────────────────────────────────────────────────────────────────────────────┐tor   D daemon
- lanes  1 main │ glyphs                                                                                 │] switch lanes
-┌ @0 · 34/38 up│   ● ready (check passed)      ◉ running (no ready check)  · stopped, not run           │──────────────┐
-│ ▾ services   │   ⠸ starting, stopping        … queued                    ✕ failed                     │              │
-│   ● Gateway A│   ◆ orphaned                  ✓ task done                 ▍ the unit's color           │              │
-│   ● api-auth │                                                                                        │ole log       │
-│   ● api-users│ list                                                                                   │──────────────┤
-│   ● api-billi│   j k  up down      move; k from the top selects the lane                              │_8120 took=40m│
-│   ● api-order│   g G               the lane, the last row                                             │              │
-│   ● api-searc│   h l               fold, unfold; h moves to the section                               │_8121 took=53m│
-│   ● api-catal│   enter  space      fold a section, or type into a running unit                        │              │
-│   ● api-inven│   [ ]  1-9          previous, next lane; lane by its place in the bar                  │_8122 took=66m│
-│   ● api-notif│   n N  e            next, previous problem; every error in full (or click it)          │              │
-│   ● api-repor│   t  i              jump to the tasks, the infra                                       │_8123 took=79m│
-│   ● web-app  │   s  x  r           start, stop, restart the selection; s runs a task                  │              │
-│   ● web-admin│   s  S              on the lane: its default services; every service                   │_8124 took=92m│
-│   ● web-docs │   p                 start the lane with chosen profiles                                │              │
-│   · web-story│   C                 clean the lane (asks first)                                        │_8125 took=105│
-│   ● web-landi│   o                 open the unit's address in a browser                               │              │
-│   ◉ wrk-email│   /                 filter by name or +tag; enter keeps, esc clears                    │_8126 took=118│
-│   ◉ wrk-billi│                                                                                        │              │
-│   ◉ wrk-index│ pane                                                                                   │_8127 took=131│
-│   ◉ wrk-thumb│   enter, click      type into the unit                                                 │              │
-│   ✕ wrk-expor│   esc  ctrl+]       stop typing (ctrl+] in full-screen programs)                       │_8128 took=144│
-│   ◉ wrk-cron │   z                 zoom the pane                                                      │              │
-│   ◉ wrk-webho│   pgup pgdn  wheel  scroll; older lines come from stored logs                          │_8129 took=157│
-│   ◉ wrk-ledge│   c  v  y           select text, mark, copy (OSC 52)                                   │              │
-│   ● stub-stri│   drag              select text and copy it                                            │_8130 took=170│
-│   ● stub-s3  │                                                                                        │              │
-│   ◆ stub-twil│ monitor (M)                                                                            │_8131 took=183│
-│   ● stub-send│   < >               sort by the previous, next column                                  │              │
-│   ● stub-segm│   i                 reverse the sort                                                   │_8132 took=196│
-│   ● stub-auth│   /  e              filter, grouped or flat                                            │              │
-│   ● proxy-edg│   h l               fold, unfold a lane                                                │_8133 took=209│
-│   ● docs-sear│   z                 detail graphs fill the page                                        │              │
-│   ● ml-ranker│   c  m              cpu or memory in the big box (memory: a square per core)           │              │
-│   ⠋ ml-embed │   wheel             scroll the table; the selection stays                              │              │
-│   ● cache-war│ …                                                                                      │              │
-└──────────────│ any key closes                                                                         │──────────────┘
- r restart   n └────────────────────────────────────────────────────────────────────────────────────────┘eys   q quit
+ devlanes  1 acme┌ keys ──────────────────────────────────────────────────────────────────────────────┐nitor   D daemon
+ lanes  1 main  2│ glyphs                                                                             │[ ] switch lanes
+┌ @0 · 34/38 up ─│   ● ready (check passed)  ◉ running (no ready check)  z throttled         ❄ frozen │────────────────┐
+│ ▾ services     │   · stopped, not run      ⠸ starting, stopping        … queued            ✕ failed │                │
+│   ● Gateway API│   ◆ orphaned              ✓ task done                 ▍ the unit's color           │                │
+│   ● api-auth   │                                                                                    │whole log       │
+│   ● api-users  │ list                                                                               │────────────────┤
+│   ● api-billing│   j k  up down      move; k from the top selects the lane                          │ob_8120 took=40m│
+│   ● api-orders │   g G               the lane, the last row                                         │                │
+│   ● api-search │   h l               fold, unfold; h moves to the section                           │ob_8121 took=53m│
+│   ● api-catalog│   enter  space      fold a section, or type into a running unit                    │                │
+│   ● api-invento│   [ ]  1-9          previous, next lane; lane by its place in the bar              │ob_8122 took=66m│
+│   ● api-notify │   n N  e            next, previous problem; every error in full (or click it)      │                │
+│   ● api-reports│   t  i              jump to the tasks, the infra                                   │ob_8123 took=79m│
+│   ● web-app    │   s  x  r           start, stop, restart the selection; s runs a task              │                │
+│   ● web-admin  │   s  S              on the lane: its default services; every service               │ob_8124 took=92m│
+│   ● web-docs   │   p                 start the lane with chosen profiles                            │                │
+│   · web-storybo│   C                 clean the lane (asks first)                                    │ob_8125 took=105│
+│   ● web-landing│   o                 open the unit's address in a browser                           │                │
+│   ◉ wrk-email  │   /                 filter by name or +tag; enter keeps, esc clears                │ob_8126 took=118│
+│   ◉ wrk-billing│                                                                                    │                │
+│   ◉ wrk-index  │ pane                                                                               │ob_8127 took=131│
+│   ◉ wrk-thumbs │   enter, click      type into the unit                                             │                │
+│   ✕ wrk-export │   esc  ctrl+]       stop typing (ctrl+] in full-screen programs)                   │ob_8128 took=144│
+│   ◉ wrk-cron   │   z                 zoom the pane                                                  │                │
+│   ◉ wrk-webhook│   pgup pgdn  wheel  scroll; older lines come from stored logs                      │ob_8129 took=157│
+│   ◉ wrk-ledger │   c  v  y           select text, mark, copy (OSC 52)                               │                │
+│   ● stub-stripe│   drag              select text and copy it                                        │ob_8130 took=170│
+│   ● stub-s3    │                                                                                    │                │
+│   ◆ stub-twilio│ monitor (M)                                                                        │ob_8131 took=183│
+│   ● stub-sendgr│   < >               sort by the previous, next column                              │                │
+│   ● stub-segmen│   i                 reverse the sort                                               │ob_8132 took=196│
+│   ● stub-auth0 │   /  e              filter, grouped or flat                                        │                │
+│   ● proxy-edge │   h l               fold, unfold a lane                                            │ob_8133 took=209│
+│   ● docs-search│   z                 detail graphs fill the page                                    │                │
+│   ● ml-ranker  │   c  m              cpu or memory in the big box (memory: a square per core)       │                │
+│   ⠋ ml-embed   │   wheel             scroll the table; the selection stays                          │                │
+│   ● cache-warm │ …                                                                                  │                │
+└────────────────│ any key closes                                                                     │────────────────┘
+ r restart   n ne└────────────────────────────────────────────────────────────────────────────────────┘ keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-14 bold black on yellow, 15-104 bold, 105-107 dim, 111 bold, 112-118 dim
-1: 0-6 dim, 7-14 bold reversed, 15 bold, 17-22 dim, 104-105 bold, 106-119 dim
-2: 0 darkgray, 2-3 bold, 4-14 dim, 15 bold, 19-20 green, 47-48 green, 75-76 dim, 104 bold, 105-119 darkgray
-3: 0 darkgray, 2-3 dim, 15 bold, 47-48 dim, 75-76 red, 104 bold, 119 darkgray
-4: 0 darkgray, 4-5 green, 6-14 blue, 15 bold, 19-20 yellow, 47-48 green, 104 bold, 119 darkgray
-5: 0 darkgray, 4-5 green, 6-13 blue, 15 bold, 104 bold, 105-111 dim, 119 darkgray
-6: 0 darkgray, 4-5 green, 6-14 blue, 15 bold, 17-20 dim, 104 bold, 105-119 darkgray
-7: 0 darkgray, 4-5 green, 6-14 blue, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-8: 0 darkgray, 4-5 green, 6-14 blue, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-9: 0 darkgray, 4-5 green, 6-14 blue, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-10: 0 darkgray, 4-5 green, 6-14 blue, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-11: 0 darkgray, 4-5 green, 6-14 blue, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-12: 0 darkgray, 4-5 green, 6-14 blue, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-13: 0 darkgray, 4-5 green, 6-14 blue, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-14: 0 darkgray, 4-12 green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-15: 0 darkgray, 4-14 green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-16: 0 darkgray, 4-13 green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-17: 0 darkgray, 4-5 dim, 6-14 dim green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-18: 0 darkgray, 4-14 green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-19: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-20: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 104 bold, 119 darkgray
-21: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-20 dim, 104 bold, 119 darkgray
-22: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-23: 0 darkgray, 1-14 reversed, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-24: 0 darkgray, 4-5 green, 6-13 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-25: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-26: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-27: 0 darkgray, 4-5 green, 6-14 darkgray, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-28: 0 darkgray, 4-5 green, 6-12 darkgray, 15 bold, 104 bold, 119 darkgray
-29: 0 darkgray, 4-5 yellow, 6-14 darkgray, 15 bold, 17-27 dim, 104 bold, 119 darkgray
-30: 0 darkgray, 4-5 green, 6-14 darkgray, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-31: 0 darkgray, 4-5 green, 6-14 darkgray, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-32: 0 darkgray, 4-5 green, 6-14 darkgray, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-33: 0 darkgray, 4-5 green, 6-14 cyan, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-34: 0 darkgray, 4-5 green, 6-14 cyan, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-35: 0 darkgray, 4-14 green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-36: 0 darkgray, 6-13 green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-37: 0 darkgray, 4-5 green, 6-14 dim blue, 15 bold, 17 dim, 104 bold, 119 darkgray
-38: 0-14 darkgray, 15 bold, 17-30 dim, 104 bold, 105-119 darkgray
-39: 1 bold, 2-12 dim, 13 bold, 14 dim, 15-104 bold, 105-110 dim, 111 bold, 112-119 dim
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-16 bold black on yellow, 17-102 bold, 103-107 dim, 111 bold, 112-118 dim
+1: 0-6 dim, 7-14 bold reversed, 16 dim, 17 bold, 19-24 dim, 102-105 bold, 106-119 dim
+2: 0 darkgray, 2-3 bold, 4-14 dim, 16 darkgray, 17 bold, 21-22 green, 45-46 green, 73-74 dim, 93-94 blue, 102 bold, 103-119 darkgray
+3: 0 darkgray, 2-3 dim, 17 bold, 21-22 dim, 73-74 dim, 93-94 red, 102 bold, 119 darkgray
+4: 0 darkgray, 4-5 green, 6-16 blue, 17 bold, 21-22 yellow, 45-46 green, 102 bold, 119 darkgray
+5: 0 darkgray, 4-5 green, 6-13 blue, 17 bold, 102 bold, 103-111 dim, 119 darkgray
+6: 0 darkgray, 4-5 green, 6-14 blue, 17 bold, 19-22 dim, 102 bold, 103-119 darkgray
+7: 0 darkgray, 4-5 green, 6-16 blue, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+8: 0 darkgray, 4-5 green, 6-15 blue, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+9: 0 darkgray, 4-5 green, 6-15 blue, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+10: 0 darkgray, 4-5 green, 6-16 blue, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+11: 0 darkgray, 4-5 green, 6-16 blue, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+12: 0 darkgray, 4-5 green, 6-15 blue, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+13: 0 darkgray, 4-5 green, 6-16 blue, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+14: 0 darkgray, 4-12 green, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+15: 0 darkgray, 4-14 green, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+16: 0 darkgray, 4-13 green, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+17: 0 darkgray, 4-5 dim, 6-16 dim green, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+18: 0 darkgray, 4-16 green, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+19: 0 darkgray, 4-5 green, 6-14 magenta, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+20: 0 darkgray, 4-5 green, 6-16 magenta, 17 bold, 102 bold, 119 darkgray
+21: 0 darkgray, 4-5 green, 6-14 magenta, 17 bold, 19-22 dim, 102 bold, 119 darkgray
+22: 0 darkgray, 4-5 green, 6-15 magenta, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+23: 0 darkgray, 1-16 reversed, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+24: 0 darkgray, 4-5 green, 6-13 magenta, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+25: 0 darkgray, 4-5 green, 6-16 magenta, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+26: 0 darkgray, 4-5 green, 6-15 magenta, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+27: 0 darkgray, 4-5 green, 6-16 darkgray, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+28: 0 darkgray, 4-5 green, 6-12 darkgray, 17 bold, 102 bold, 119 darkgray
+29: 0 darkgray, 4-5 yellow, 6-16 darkgray, 17 bold, 19-29 dim, 102 bold, 119 darkgray
+30: 0 darkgray, 4-5 green, 6-16 darkgray, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+31: 0 darkgray, 4-5 green, 6-16 darkgray, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+32: 0 darkgray, 4-5 green, 6-15 darkgray, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+33: 0 darkgray, 4-5 green, 6-15 cyan, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+34: 0 darkgray, 4-5 green, 6-16 cyan, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+35: 0 darkgray, 4-14 green, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+36: 0 darkgray, 6-13 green, 17 bold, 19-38 bold, 102 bold, 119 darkgray
+37: 0 darkgray, 4-5 green, 6-15 dim blue, 17 bold, 19 dim, 102 bold, 119 darkgray
+38: 0-16 darkgray, 17 bold, 19-32 dim, 102 bold, 103-119 darkgray
+39: 1 bold, 2-12 dim, 13 bold, 14-16 dim, 17-102 bold, 103-110 dim, 111 bold, 112-119 dim

@@ -1,0 +1,122 @@
+ devlanes  1 acme   2 billing   3 shop                                                                                                                                             M monitor   D daemon
+ lanes  1 main  2 feat/checkout  3 fix/cache  4 spike/old-search                                                                                                                1-9 or [ ] switch lanes
+┌ @0 frozen · 37/38 up ────────────────────────┐┌ main @0 · frozen · 37 up ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ ▾ services                                34 ││ branch    main                                                                                                                                       │
+│   ❄ Gateway API                              ││ worktree  /work/acme                                                                                                                                 │
+│   ❄ api-auth                                 ││ profile   web                                                                                                                                        │
+│   ❄ api-users                                ││ domain    acme.localhost                                                                                                                             │
+│   ❄ api-billing                              ││ ports     41000-41099                                                                                                                                │
+│   ❄ api-orders                               ││ idle      frozen since 17:34 UTC, last activity a request at 17:19 UTC                                                                               │
+│   ❄ api-search                               ││ services  33 of 34 up                                                                                                                                │
+│   ❄ api-catalog                              ││           · web-storybook    stopped                                                                                                                 │
+│   ❄ api-inventory                            ││ tasks     3 done, 4 not run                                                                                                                          │
+│   ❄ api-notify                               ││ setup     4 of 4 done                                                                                                                                │
+│   ❄ api-reports                              ││ infra     localstack :4566, postgres :5432 (shared), rabbitmq :5672, redis :6379 (shared)                                                            │
+│   ❄ web-app                                  ││                                                                                                                                                      │
+│   ❄ web-admin                                ││ lanes in acme                                                                                                                                        │
+│   ❄ web-docs                                 ││ ▌ main @0                  frozen · 37 up                                                                                                            │
+│   · web-storybook                            ││   feat/checkout @1         throttled · 8 up                                                                                                          │
+│   ❄ web-landing                              ││   fix/cache @2             not running · config changed                                                                                              │
+│   ❄ wrk-email                                ││   spike/old-search @3      worktree missing                                                                                                          │
+│   ❄ wrk-billing                              ││                                                                                                                                                      │
+│   ❄ wrk-index                                ││ 1-9 (the lane's place in the bar), [ and ] or a click on a chip switch lanes. devlanes lane new <branch> adds one.                                   │
+│   ❄ wrk-thumbs                               ││                                                                                                                                                      │
+│   ❄ wrk-export                               ││                                                                                                                                                      │
+│   ❄ wrk-cron                                 ││                                                                                                                                                      │
+│   ❄ wrk-webhooks                             ││                                                                                                                                                      │
+│   ❄ wrk-ledger                               ││                                                                                                                                                      │
+│   ❄ stub-stripe                              ││                                                                                                                                                      │
+│   ❄ stub-s3                                  ││                                                                                                                                                      │
+│   ❄ stub-twilio                              ││                                                                                                                                                      │
+│   ❄ stub-sendgrid                            ││                                                                                                                                                      │
+│   ❄ stub-segment                             ││                                                                                                                                                      │
+│   ❄ stub-auth0                               ││                                                                                                                                                      │
+│   ❄ proxy-edge                               ││                                                                                                                                                      │
+│   ❄ docs-search                              ││                                                                                                                                                      │
+│   ❄ ml-ranker                                ││                                                                                                                                                      │
+│   ❄ ml-embed                                 ││                                                                                                                                                      │
+│   ❄ cache-warm                               ││                                                                                                                                                      │
+│                                              ││                                                                                                                                                      │
+│ ▾ tasks                                    7 ││                                                                                                                                                      │
+│   ✓ migrate             done · runs at start ││                                                                                                                                                      │
+│   ✓ seed                                done ││                                                                                                                                                      │
+│   · lint                             not run ││                                                                                                                                                      │
+│   · typecheck                        not run ││                                                                                                                                                      │
+│   · test-e2e                         not run ││                                                                                                                                                      │
+│   ✓ codegen                             done ││                                                                                                                                                      │
+│   · clean-cache                      not run ││                                                                                                                                                      │
+│                                              ││                                                                                                                                                      │
+│ ▾ infra                                      ││                                                                                                                                                      │
+│   ▾ containers                      2 frozen ││                                                                                                                                                      │
+│     ❄ localstack                             ││                                                                                                                                                      │
+│     ❄ rabbitmq                               ││                                                                                                                                                      │
+│   ▾ shared                              3 up ││                                                                                                                                                      │
+│     ● pgbouncer                              ││                                                                                                                                                      │
+│     ● postgres                               ││                                                                                                                                                      │
+│     ● redis                                  ││                                                                                                                                                      │
+│   ▸ setup                             4 done ││                                                                                                                                                      │
+│                                              ││                                                                                                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ x stop lane   r restart lane   p start with profiles   C clean lane   [ ] switch lane   / filter                                                                                 ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 179 bold, 180-187 dim, 191 bold, 192-198 dim
+1: 0-6 dim, 7-14 bold reversed, 16-30 dim, 33-43 dim, 46-47 dim, 48-63 yellow, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
+2: 0 darkgray, 1-22 bold reversed, 23-48 darkgray, 50-53 bold, 57-73 dim, 75-199 darkgray
+3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-59 dim, 199 darkgray
+4: 0 darkgray, 4-16 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+5: 0 darkgray, 4-13 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+6: 0 darkgray, 4-14 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+7: 0 darkgray, 4-16 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+8: 0 darkgray, 4-15 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+9: 0 darkgray, 4-15 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+10: 0 darkgray, 4-16 blue, 47-48 darkgray, 60-61 dim, 79-85 dim, 199 darkgray
+11: 0 darkgray, 4-18 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+12: 0 darkgray, 4-15 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+13: 0 darkgray, 4-16 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+14: 0 darkgray, 4-5 blue, 6-12 green, 47-48 darkgray, 199 darkgray
+15: 0 darkgray, 4-5 blue, 6-14 green, 47-48 darkgray, 50-62 bold, 199 darkgray
+16: 0 darkgray, 4-5 blue, 6-13 green, 47-48 darkgray, 50-51 bold, 77-90 dim, 199 darkgray
+17: 0 darkgray, 4-5 dim, 6-18 dim green, 47-48 darkgray, 50-51 bold, 77-92 dim, 199 darkgray
+18: 0 darkgray, 4-5 blue, 6-16 green, 47-48 darkgray, 50-51 bold, 77-104 dim, 199 darkgray
+19: 0 darkgray, 4-5 blue, 6-14 magenta, 47-48 darkgray, 50-51 bold, 77-92 yellow, 199 darkgray
+20: 0 darkgray, 4-5 blue, 6-16 magenta, 47-48 darkgray, 199 darkgray
+21: 0 darkgray, 4-5 blue, 6-14 magenta, 47-48 darkgray, 50-163 dim, 199 darkgray
+22: 0 darkgray, 4-5 blue, 6-15 magenta, 47-48 darkgray, 199 darkgray
+23: 0 darkgray, 4-5 blue, 6-15 magenta, 47-48 darkgray, 199 darkgray
+24: 0 darkgray, 4-5 blue, 6-13 magenta, 47-48 darkgray, 199 darkgray
+25: 0 darkgray, 4-5 blue, 6-17 magenta, 47-48 darkgray, 199 darkgray
+26: 0 darkgray, 4-5 blue, 6-15 magenta, 47-48 darkgray, 199 darkgray
+27: 0 darkgray, 4-5 blue, 6-16 darkgray, 47-48 darkgray, 199 darkgray
+28: 0 darkgray, 4-5 blue, 6-12 darkgray, 47-48 darkgray, 199 darkgray
+29: 0 darkgray, 4-5 blue, 6-16 darkgray, 47-48 darkgray, 199 darkgray
+30: 0 darkgray, 4-5 blue, 6-18 darkgray, 47-48 darkgray, 199 darkgray
+31: 0 darkgray, 4-5 blue, 6-17 darkgray, 47-48 darkgray, 199 darkgray
+32: 0 darkgray, 4-5 blue, 6-15 darkgray, 47-48 darkgray, 199 darkgray
+33: 0 darkgray, 4-5 blue, 6-15 cyan, 47-48 darkgray, 199 darkgray
+34: 0 darkgray, 4-5 blue, 6-16 cyan, 47-48 darkgray, 199 darkgray
+35: 0 darkgray, 4-5 blue, 6-14 green, 47-48 darkgray, 199 darkgray
+36: 0 darkgray, 4-5 blue, 6-13 green, 47-48 darkgray, 199 darkgray
+37: 0 darkgray, 4-5 blue, 6-15 dim blue, 47-48 darkgray, 199 darkgray
+38: 0 darkgray, 47-48 darkgray, 199 darkgray
+39: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 199 darkgray
+40: 0 darkgray, 4-5 green, 26-45 dim, 47-48 darkgray, 199 darkgray
+41: 0 darkgray, 4-5 green, 42-45 dim, 47-48 darkgray, 199 darkgray
+42: 0 darkgray, 4-9 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+43: 0 darkgray, 4-14 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+44: 0 darkgray, 4-13 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+45: 0 darkgray, 4-5 green, 42-45 dim, 47-48 darkgray, 199 darkgray
+46: 0 darkgray, 4-16 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+47: 0 darkgray, 47-48 darkgray, 199 darkgray
+48: 0 darkgray, 2-3 dim, 47-48 darkgray, 199 darkgray
+49: 0 darkgray, 4-5 dim, 38-45 dim, 47-48 darkgray, 199 darkgray
+50: 0 darkgray, 6-7 blue, 8-17 green, 47-48 darkgray, 199 darkgray
+51: 0 darkgray, 6-7 blue, 8-15 cyan, 47-48 darkgray, 199 darkgray
+52: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 199 darkgray
+53: 0 darkgray, 6-7 green, 8-16 dim magenta, 47-48 darkgray, 199 darkgray
+54: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 199 darkgray
+55: 0 darkgray, 6-7 green, 8-12 cyan, 47-48 darkgray, 199 darkgray
+56: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 199 darkgray
+57: 0 darkgray, 47-48 darkgray, 199 darkgray
+58: 0-199 darkgray
+59: 1 bold, 2-14 dim, 15 bold, 16-31 dim, 32 bold, 33-55 dim, 56 bold, 57-70 dim, 71-73 bold, 74-88 dim, 89 bold, 90-99 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim

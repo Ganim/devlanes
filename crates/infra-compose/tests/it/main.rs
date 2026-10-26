@@ -207,6 +207,147 @@ async fn docker_shared_and_lane_projects() {
     drop(cleanup);
 }
 
+/// `(service, state)` of every container in compose project `project`.
+async fn states(compose: &Compose, project: &str) -> Vec<(String, String)> {
+    compose
+        .cli()
+        .ps(project)
+        .await
+        .expect("ps")
+        .into_iter()
+        .map(|status| (status.service, status.state))
+        .collect()
+}
+
+/// Pausing a lane touches only its own project, a second call changes nothing,
+/// `lane_up` right after an unpause does not wait for the next healthcheck, and
+/// `lane_up` brings back a lane that is still paused.
+#[tokio::test]
+#[ignore = "needs docker"]
+async fn docker_lane_pause_unpause() {
+    let prefix = unique_prefix();
+    let lane1 = lane_project_name(&prefix, 1).expect("valid name");
+    let cleanup = Cleanup {
+        projects: vec![prefix.clone(), lane1.clone()],
+        containers: Vec::new(),
+    };
+    bounded(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Checks run every 500 ms until the first one passes, then every 60 s, so
+        // none runs between the unpause and the `lane_up` after it.
+        let file = r#"services:
+  shared:
+    image: redis:7-alpine
+  lane:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 60s
+      start_period: 60s
+      start_interval: 500ms
+"#;
+        std::fs::write(dir.path().join("compose.yaml"), file).expect("write compose file");
+        let compose = Compose::new(ComposeCli::new());
+        let shared = SharedInfra {
+            project_name: Some(prefix.clone()),
+            primary_dir: dir.path().to_owned(),
+            files: vec!["compose.yaml".into()],
+            env_file: None,
+            profiles: Vec::new(),
+            exclude: BTreeSet::new(),
+            per_lane: set(&["lane"]),
+            env: BTreeMap::new(),
+        };
+        compose
+            .shared_up(&shared, UpOptions::default())
+            .await
+            .expect("shared up");
+        let infra = LaneInfra {
+            project: prefix.clone(),
+            lane: 1,
+            lane_dir: dir.path().to_owned(),
+            files: vec!["compose.yaml".into()],
+            env_file: None,
+            profiles: Vec::new(),
+            exclude: BTreeSet::new(),
+            per_lane: set(&["lane"]),
+            env: BTreeMap::new(),
+            state_dir: dir.path().join("state"),
+        };
+        let block = PortBlock::new(free_port(), 1).expect("block");
+        let report = compose
+            .lane_up(&infra, &LanePorts::new(), block, UpOptions::default())
+            .await
+            .expect("lane up");
+        assert_eq!(report.health["lane"], Health::Healthy);
+
+        assert_eq!(compose.lane_pause(&prefix, 1).await.expect("pause"), 1);
+        let paused = [("lane".to_owned(), "paused".to_owned())];
+        assert_eq!(states(&compose, &lane1).await, paused);
+        let running = [("shared".to_owned(), "running".to_owned())];
+        assert_eq!(states(&compose, &prefix).await, running);
+        assert_eq!(
+            compose.lane_pause(&prefix, 1).await.expect("pause again"),
+            0
+        );
+        assert_eq!(
+            compose
+                .lane_pause(&prefix, 9)
+                .await
+                .expect("no lane project"),
+            0
+        );
+
+        assert_eq!(compose.lane_unpause(&prefix, 1).await.expect("unpause"), 1);
+        assert_eq!(
+            compose
+                .lane_unpause(&prefix, 1)
+                .await
+                .expect("unpause again"),
+            0
+        );
+        // Docker reads `unhealthy` until the next check, 60 s away, and `lane_up`
+        // must not wait for it.
+        let lane_health = |health: &str| vec![("lane".to_owned(), health.to_owned())];
+        assert_eq!(health_of(&compose, &lane1).await, lane_health("unhealthy"));
+        let started = std::time::Instant::now();
+        let report = compose
+            .lane_up(&infra, &LanePorts::new(), block, UpOptions::default())
+            .await
+            .expect("lane up right after the unpause");
+        assert_eq!(report.health["lane"], Health::Healthy);
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+
+        // A lane left paused, as after a failed thaw, still comes up.
+        assert_eq!(compose.lane_pause(&prefix, 1).await.expect("pause"), 1);
+        let report = compose
+            .lane_up(&infra, &LanePorts::new(), block, UpOptions::default())
+            .await
+            .expect("lane up while paused");
+        assert_eq!(report.health["lane"], Health::Healthy);
+        let running = [("lane".to_owned(), "running".to_owned())];
+        assert_eq!(states(&compose, &lane1).await, running);
+    })
+    .await;
+    drop(cleanup);
+}
+
+/// `(service, health)` of every container in compose project `project`.
+async fn health_of(compose: &Compose, project: &str) -> Vec<(String, String)> {
+    compose
+        .cli()
+        .ps(project)
+        .await
+        .expect("ps")
+        .into_iter()
+        .map(|status| (status.service, status.health))
+        .collect()
+}
+
 #[tokio::test]
 #[ignore = "needs docker"]
 async fn docker_container_name_conflict_is_explained() {

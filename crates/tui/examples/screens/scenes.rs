@@ -46,6 +46,8 @@ const STEP_BUDGET: usize = 2_000;
 struct Fake {
     app: App,
     queue: VecDeque<Msg>,
+    /// What `status` answers; a scene may swap it, as [`idle`] does.
+    lanes: fn() -> Vec<devlanes_proto::LaneSummary>,
 }
 
 impl Fake {
@@ -58,6 +60,7 @@ impl Fake {
         let mut fake = Self {
             app,
             queue: VecDeque::new(),
+            lanes: data::lanes,
         };
         for effect in fake.app.start() {
             fake.answer(effect);
@@ -140,7 +143,7 @@ impl Fake {
         };
         let reply = match effect {
             Effect::Subscribe => vec![Msg::Subscribed(Ok(()))],
-            Effect::Refresh => vec![Msg::Status(Ok(data::lanes()))],
+            Effect::Refresh => vec![Msg::Status(Ok((self.lanes)()))],
             Effect::Attach {
                 generation,
                 lane,
@@ -304,6 +307,12 @@ fn unsaved(f: &mut Fake) {
     f.key(KeyCode::Enter);
 }
 
+/// The daemon's lanes after a quiet stretch: `acme@0` frozen, `acme@1` throttled.
+fn idle(f: &mut Fake) {
+    f.lanes = data::idle_lanes;
+    f.send(Msg::Status(Ok(data::idle_lanes())));
+}
+
 /// The scene `lanes-unit` in another color tier and glyph set.
 fn themed(f: &mut Fake, tier: Tier, glyphs: Glyphs) {
     f.app.theme = Theme { tier, glyphs };
@@ -395,6 +404,42 @@ fn scenes() -> Vec<Scene> {
             name: "lane-missing-worktree",
             what: "a lane whose worktree directory is gone",
             setup: |f| f.lane("acme@3"),
+        },
+        Scene {
+            name: "lane-frozen",
+            what: "a frozen lane selected: ❄ on its services and own containers, frozen after @0, when and why in the facts",
+            setup: |f| {
+                idle(f);
+                f.lane("acme@0");
+            },
+        },
+        Scene {
+            name: "unit-frozen",
+            what: "a service of the frozen lane: ❄ frozen in the pane header",
+            setup: |f| {
+                idle(f);
+                f.unit("acme@0", "api-gateway");
+            },
+        },
+        Scene {
+            name: "unit-throttled",
+            what: "a service of a throttled lane: z throttled in the pane header",
+            setup: |f| {
+                idle(f);
+                f.unit("acme@1", "api-orders");
+            },
+        },
+        Scene {
+            name: "frozen-ascii",
+            what: "the frozen lane with ASCII glyphs: ~ frozen, z throttled",
+            setup: |f| {
+                f.app.theme = Theme {
+                    tier: Tier::Ansi,
+                    glyphs: Glyphs::Ascii,
+                };
+                idle(f);
+                f.unit("acme@0", "api-gateway");
+            },
         },
         Scene {
             name: "project-shop",

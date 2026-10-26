@@ -310,6 +310,7 @@ pub fn lane_view(lane: &ResolvedLane) -> Value {
                     "pty": s.pty,
                     "autostart": s.autostart,
                     "hidden": s.hidden,
+                    "keep_awake": s.keep_awake,
                     "tags": s.tags,
                     "literal_port": s.literal_port,
                     "sync": s.sync.iter().map(|s| format!("{:?}", s)).collect::<Vec<_>>(),

@@ -13,6 +13,7 @@ mod dns;
 mod engine;
 mod files;
 pub mod hosts;
+pub mod idle;
 mod infra_logs;
 mod input;
 pub mod integrations;

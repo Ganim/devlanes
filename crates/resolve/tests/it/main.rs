@@ -386,6 +386,20 @@ async fn autostart_expressions_follow_the_lane() {
     assert_eq!(services, ["api", "worker"]);
 }
 
+#[tokio::test]
+/// `keep_awake` defaults to false, reaches every replica, comes from templates, and an
+/// expression is evaluated per lane.
+async fn keep_awake_reaches_resolved_services() {
+    let yaml = "project: demo\ntemplates:\n  awake: { keep_awake: true }\nservices:\n  api: { run: a }\n  jobs: { run: j, extends: awake, replicas: 2 }\n  cron: { run: c, keep_awake: '${{ lane.index == 0 }}' }\n";
+    for index in [0, 1] {
+        let lane = plain(yaml, index).await;
+        let awake = |unit: &str| lane.services[unit].keep_awake;
+        assert!(!awake("api"));
+        assert!(awake("jobs.1") && awake("jobs.2"));
+        assert_eq!(awake("cron"), index == 0, "lane {index}");
+    }
+}
+
 /// Config with overlapping profiles for the multi-profile tests.
 const PROFILES: &str = r#"
 project: demo

@@ -442,6 +442,7 @@ fn service_layout<E: Extensions>(
         literal_port,
         hidden: flag(&entry.service.hidden, "hidden", false)?,
         autostart: flag(&entry.service.autostart, "autostart", true)?,
+        keep_awake: flag(&entry.service.keep_awake, "keep_awake", false)?,
         tags: entry.service.tags.clone().unwrap_or_default(),
         color: entry.color.to_owned(),
         display_name: entry.service.name.as_ref().map(|display| {

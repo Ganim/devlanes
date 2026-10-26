@@ -9,6 +9,7 @@ mod file;
 mod job;
 mod net;
 mod pipe;
+mod power;
 mod proc;
 mod registry;
 mod security;

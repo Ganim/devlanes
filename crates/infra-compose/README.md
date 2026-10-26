@@ -59,6 +59,7 @@ In the daemon, host ports come from the persisted offsets (`PortRequest::key()` 
 ## API
 
 - `Compose`: `shared_up`, `shared_status`, `shared_stop`, `lane_port_requests`, `lane_up`, `lane_status`, `lane_stop`, `lane_down` (lane clean, removes named volumes).
+- `Compose::lane_pause` / `lane_unpause`: pause or unpause a frozen lane's `<project>-lane<N>` containers and return how many changed; the shared project is never touched.
 - `SharedReport` / `LaneReport`: `endpoints` (first published port and host ports keyed by container port) and `health` per service.
 - `ComposeModel`: the parsed output of `docker compose config --format json`.
 - `render_override`: the per-lane override file as text, for tests and diagnostics.
@@ -89,7 +90,9 @@ Lane projects start with `--no-deps`, so a lane never starts its own copy of a s
 
 A shared service whose `container_name` already exists is adopted when the container belongs to the same Compose project. Otherwise `shared_up` fails and names the command that frees the name.
 
-Operations on one Compose project run one at a time. `ps`, `stop` and `down` need only the project name, so they still work after a worktree is removed.
+Docker marks an unpaused container with a healthcheck `unhealthy` until its next check runs, and `up --wait` fails on that. `lane_up` unpauses the lane's paused containers first. A service whose containers were healthy before the pause, with a failing streak below the healthcheck's retries, comes up without `--wait`, unless Compose replaces its container. One paused before its first passing check is waited for until its next check, up to the wait timeout.
+
+Operations on one Compose project run one at a time, except `lane_unpause`, so a thaw never waits behind a long `up`. `ps`, `stop` and `down` need only the project name, so they still work after a worktree is removed.
 
 ## License
 

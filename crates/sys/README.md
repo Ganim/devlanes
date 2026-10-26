@@ -31,6 +31,9 @@ All functions block. Call them from `spawn_blocking` in async code.
 - `session_members_known`: the same, but a recorded member still in the session also proves it is ours, because a PID in use as a session ID is never reassigned. For a supervisor that reaped the leader itself.
 - `boot_id`: an opaque token for the current boot, so records from before a reboot are never matched against live PIDs.
 - `listening_tcp`: TCP listeners of a set of PIDs, for diagnostics only.
+- `tcp_connections`: every established TCP connection on the machine, including ones a server has not accepted yet, so connections to a frozen lane show up.
+- `resume_verified` (Windows only): takes one suspension off a verified process, for processes a crashed daemon left frozen.
+- `set_background` (macOS only): moves a verified process into the background priority band (`PRIO_DARWIN_BG`) or back out.
 - `open_file`, `holders`: find processes that still hold a PTY slave or pipe open.
 - `raise_nofile_limit`, `child_nofile_limit`: raise the daemon's open-file limit and keep the original for children.
 - `wsl`: whether this Linux process runs in a WSL distro (distro name, WSL 1 or 2, interop, systemd), detected once from the kernel release, the WSL interop binfmt entry and `WSL_DISTRO_NAME`. A container on Docker Desktop's WSL kernel is not WSL. Always `None` on macOS.
@@ -42,7 +45,7 @@ All functions block. Call them from `spawn_blocking` in async code.
 
 Start times are clock ticks since boot on Linux and microseconds since the epoch on macOS. Only compare them on the machine that recorded them. Identity checks ignore the session ID, because a process can move to a new session after it was recorded.
 
-On macOS, `listening_tcp` runs `/usr/sbin/lsof`, and zombies are read through `sysctl` because libproc no longer reports them. Linux reads everything from procfs.
+On macOS, `listening_tcp` runs `/usr/sbin/lsof`, and zombies are read through `sysctl` because libproc no longer reports them. `tcp_connections` reads the `net.inet.tcp.pcblist_n` sysctl that `netstat` uses; its layout is private, so the parser checks every length and fails with `Error::Malformed` instead of guessing. Linux reads everything from procfs.
 
 `unsafe` code is confined to the macOS modules (libproc, mach and sysctl calls).
 

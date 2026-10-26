@@ -90,6 +90,38 @@ a lane whose worktree directory is gone
 - 120x40: [txt](lane-missing-worktree-120x40.txt) · [png](lane-missing-worktree-120x40.png) · [ansi](lane-missing-worktree-120x40.ansi)
 - 80x24: [txt](lane-missing-worktree-80x24.txt) · [png](lane-missing-worktree-80x24.png) · [ansi](lane-missing-worktree-80x24.ansi)
 
+## lane-frozen
+
+a frozen lane selected: ❄ on its services and own containers, frozen after @0, when and why in the facts
+
+- 200x60: [txt](lane-frozen-200x60.txt) · [png](lane-frozen-200x60.png) · [ansi](lane-frozen-200x60.ansi)
+- 120x40: [txt](lane-frozen-120x40.txt) · [png](lane-frozen-120x40.png) · [ansi](lane-frozen-120x40.ansi)
+- 80x24: [txt](lane-frozen-80x24.txt) · [png](lane-frozen-80x24.png) · [ansi](lane-frozen-80x24.ansi)
+
+## unit-frozen
+
+a service of the frozen lane: ❄ frozen in the pane header
+
+- 200x60: [txt](unit-frozen-200x60.txt) · [png](unit-frozen-200x60.png) · [ansi](unit-frozen-200x60.ansi)
+- 120x40: [txt](unit-frozen-120x40.txt) · [png](unit-frozen-120x40.png) · [ansi](unit-frozen-120x40.ansi)
+- 80x24: [txt](unit-frozen-80x24.txt) · [png](unit-frozen-80x24.png) · [ansi](unit-frozen-80x24.ansi)
+
+## unit-throttled
+
+a service of a throttled lane: z throttled in the pane header
+
+- 200x60: [txt](unit-throttled-200x60.txt) · [png](unit-throttled-200x60.png) · [ansi](unit-throttled-200x60.ansi)
+- 120x40: [txt](unit-throttled-120x40.txt) · [png](unit-throttled-120x40.png) · [ansi](unit-throttled-120x40.ansi)
+- 80x24: [txt](unit-throttled-80x24.txt) · [png](unit-throttled-80x24.png) · [ansi](unit-throttled-80x24.ansi)
+
+## frozen-ascii
+
+the frozen lane with ASCII glyphs: ~ frozen, z throttled
+
+- 200x60: [txt](frozen-ascii-200x60.txt) · [png](frozen-ascii-200x60.png) · [ansi](frozen-ascii-200x60.ansi)
+- 120x40: [txt](frozen-ascii-120x40.txt) · [png](frozen-ascii-120x40.png) · [ansi](frozen-ascii-120x40.ansi)
+- 80x24: [txt](frozen-ascii-80x24.txt) · [png](frozen-ascii-80x24.png) · [ansi](frozen-ascii-80x24.ansi)
+
 ## project-shop
 
 another project tab (Shift+3)

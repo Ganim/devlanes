@@ -455,16 +455,44 @@ pub(crate) fn event_line(event: &Event) -> String {
     match event.event.as_str() {
         events::LANE_CHANGED => {
             let lane = &data["lane"];
-            format!("{name} {} {}", text(lane, "reference"), text(lane, "state"))
+            let line = format!("{name} {} {}", text(lane, "reference"), text(lane, "state"));
+            match text(&lane["power"], "level") {
+                level if level.is_empty() => line,
+                level => format!("{line} {level}"),
+            }
         }
         events::UNIT_CHANGED => {
             let unit = &data["unit"];
-            format!(
+            let line = format!(
                 "{name} {}:{} {}",
                 text(unit, "lane"),
                 text(unit, "name"),
                 text(unit, "state")
-            )
+            );
+            match text(unit, "power") {
+                power if power.is_empty() => line,
+                power => format!("{line} {power}"),
+            }
+        }
+        events::LANE_IDLE => format!("{name} {} {}", text(data, "lane"), text(data, "level")),
+        events::LANE_THAWED => format!(
+            "{name} {} from {} by {}",
+            text(data, "lane"),
+            text(data, "from"),
+            words::activity(&text(data, "activity"))
+        ),
+        events::LANE_IDLE_FAILED => {
+            let message = match text(data, "message") {
+                message if message.is_empty() => text(data, "code"),
+                message => message,
+            };
+            // `normal` is a failed thaw: the lane stays idle and is retried.
+            let step = match text(data, "level") {
+                level if level == "normal" || text(data, "code") == "thaw_failed" => "thaw".into(),
+                level if level.is_empty() => "idle".into(),
+                level => level,
+            };
+            format!("{name} {} {step}: {message}", text(data, "lane"))
         }
         events::PHASE => format!(
             "{name} {} {} {}",

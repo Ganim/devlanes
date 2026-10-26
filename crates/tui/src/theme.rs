@@ -40,6 +40,8 @@ pub enum Tone {
     Attention,
     /// Starting, stopping, running tasks: default text, the spinner shows motion.
     Busy,
+    /// The glyph of a frozen unit or container: blue, a color no other state uses.
+    Frozen,
     /// Stopped, not run, labels and secondary text: dimmed.
     Quiet,
 }
@@ -56,6 +58,10 @@ pub enum Glyph {
     Stopped,
     Done,
     Orphaned,
+    /// Running at low priority in an idle lane.
+    Throttled,
+    /// Suspended in an idle lane until its next activity.
+    Frozen,
     /// The unit's color, one cell at the left of its row.
     Bar,
     /// Focus and selection, column 0.
@@ -147,6 +153,7 @@ impl Theme {
             Tone::Failure => self.rgb((0xe5, 0x58, 0x4a), (0xc0, 0x39, 0x2b), Color::Red),
             Tone::Attention => self.rgb((0xe8, 0xa1, 0x3c), (0xa3, 0x5a, 0x00), Color::Yellow),
             Tone::Busy => None,
+            Tone::Frozen => self.rgb((0x6c, 0xa8, 0xe8), (0x1f, 0x63, 0xb0), Color::Blue),
             Tone::Quiet => return self.quiet(),
         };
         color.map_or_else(Style::new, |color| Style::new().fg(color))
@@ -266,6 +273,9 @@ impl Theme {
             Glyph::Stopped => pick("·", "-"),
             Glyph::Done => pick("✓", "+"),
             Glyph::Orphaned => pick("◆", "!"),
+            Glyph::Throttled => "z",
+            // U+2744 without the emoji variation selector, which would make it two cells wide.
+            Glyph::Frozen => pick("❄", "~"),
             Glyph::Bar => pick("▍", "|"),
             Glyph::Marker => pick("▌", ">"),
             Glyph::Open => pick("▾", "v"),
@@ -378,7 +388,41 @@ mod tests {
             glyphs: Glyphs::Ascii,
         };
         assert_eq!(ascii.glyph(Glyph::Ready), "*");
+        assert_eq!(ascii.glyph(Glyph::Throttled), "z");
+        assert_eq!(ascii.glyph(Glyph::Frozen), "~");
         assert_eq!(ascii.spinner(5), "\\");
+    }
+
+    /// Rows align on glyph widths: the frozen glyph must stay one cell, which
+    /// it does only without the emoji variation selector (U+FE0F).
+    #[test]
+    fn idle_glyphs_are_one_cell_wide() {
+        let unicode = Theme::default();
+        assert_eq!(unicode.glyph(Glyph::Frozen), "\u{2744}");
+        assert_eq!(crate::text::width(unicode.glyph(Glyph::Frozen)), 1);
+        assert_eq!(unicode.glyph(Glyph::Throttled), "z");
+        assert_eq!(crate::text::width(unicode.glyph(Glyph::Throttled)), 1);
+    }
+
+    #[test]
+    fn frozen_is_blue_while_colors_are_on() {
+        let dark = Theme {
+            tier: Tier::Dark,
+            glyphs: Glyphs::Unicode,
+        };
+        assert_eq!(
+            dark.tone(Tone::Frozen),
+            Style::new().fg(Color::Rgb(0x6c, 0xa8, 0xe8))
+        );
+        assert_eq!(
+            Theme::default().tone(Tone::Frozen),
+            Style::new().fg(Color::Blue)
+        );
+        let plain = Theme {
+            tier: Tier::Plain,
+            glyphs: Glyphs::Unicode,
+        };
+        assert_eq!(plain.tone(Tone::Frozen), Style::new());
     }
 
     #[test]

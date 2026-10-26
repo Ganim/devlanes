@@ -32,15 +32,20 @@ fn unit_label(unit: &UnitSummary, cx: &Ctx<'_>) -> String {
     }
 }
 
-/// The state word, with the queue place for queued units (`queued 6/40`). People
-/// see `running` for a unit that is ready only because its process started.
-fn state_label(unit: &UnitSummary, cx: &Ctx<'_>) -> String {
-    let word = if cx.human() {
+/// The state word people see ([`UnitSummary::shown_state`]: `running`, `frozen`,
+/// `throttled`); other modes keep the protocol word, which scripts match.
+fn state_word<'a>(unit: &'a UnitSummary, cx: &Ctx<'_>) -> &'a str {
+    if cx.human() {
         unit.shown_state()
     } else {
         &unit.state
-    };
-    let state = clean(&word.to_lowercase());
+    }
+}
+
+/// The state word, with the queue place for queued units (`queued 6/40`). People
+/// see `running` for a unit that is ready only because its process started.
+fn state_label(unit: &UnitSummary, cx: &Ctx<'_>) -> String {
+    let state = clean(&state_word(unit, cx).to_lowercase());
     match queue_place(unit).filter(|_| state == "queued") {
         Some(place) => format!("{state} {place}"),
         None => state,
@@ -85,6 +90,10 @@ pub(crate) fn unit_line(unit: &UnitSummary, cx: &Ctx<'_>) -> String {
     }
     if let Some(code) = unit.exit_code {
         line.push_str(&format!(" exit={code}"));
+    }
+    // The line keeps `ready` first: a frozen unit still serves, its next request thaws it.
+    if let Some(power) = &unit.power {
+        line.push_str(&format!(" power={}", clean(power)));
     }
     if orphaned(unit)
         && let Some(pid) = unit.pid
@@ -626,6 +635,16 @@ fn services(lane: &LaneSummary) -> Vec<&UnitSummary> {
         .collect()
 }
 
+/// `frozen 12m` or `throttled 3m` for an idle lane: its level and how long it has held it.
+fn power_note(lane: &LaneSummary) -> Option<String> {
+    let power = lane.power.as_ref()?;
+    Some(format!(
+        "{} {}",
+        clean(&power.level),
+        super::age(power.since_ms)
+    ))
+}
+
 /// Notes shown after a lane row: moves, config, missing env or worktree, reasons.
 fn lane_notes(lane: &LaneSummary) -> Vec<String> {
     let mut notes = Vec::new();
@@ -841,7 +860,10 @@ pub(super) fn status(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         rows.push(vec![
             lane.index.map_or("–".into(), |index| index.to_string()),
             lane.branch.as_deref().map_or("–".into(), clean),
-            cx.state(&clean(&lane.state)),
+            match power_note(lane) {
+                Some(note) => format!("{} {}", cx.state(&clean(&lane.state)), cx.paint(&note, "2")),
+                None => cx.state(&clean(&lane.state)),
+            },
             if active && !services.is_empty() {
                 format!("{ready}/{}", services.len())
             } else {
@@ -940,6 +962,9 @@ fn agent_lane(lane: &LaneSummary) -> String {
     if !failed.is_empty() {
         line.push_str(&format!(" failed={}", failed.join(",")));
     }
+    if let Some(power) = &lane.power {
+        line.push_str(&format!(" power={}", clean(&power.level)));
+    }
     for note in lane_notes(lane) {
         line.push_str(&format!(" ({note})"));
     }
@@ -964,7 +989,7 @@ fn unit_table(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
         }
         rows.push(vec![
             cx.unit_name(&unit_label(unit, cx), &unit.state, unit.color.as_deref()),
-            cx.state_text(&unit.state, &state),
+            cx.state_text(state_word(unit, cx), &state),
             if ports.is_empty() {
                 "–".into()
             } else {
@@ -1097,6 +1122,32 @@ pub(super) fn lane_clean(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         lines.push(format!("  infra: {}", text(error, "message")));
     }
     lines
+}
+
+/// `debug freeze`: `frozen acme@2`, and what thaws it.
+pub(super) fn freeze(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
+    let lane = text(data, "lane");
+    let level = match text(data, "level") {
+        level if level.is_empty() => "frozen".to_owned(),
+        level => level,
+    };
+    vec![
+        format!("{} {lane}", cx.state(&level)),
+        format!(
+            "  a request, a connection or a command thaws it, or run {}",
+            Hint::command(["debug", "thaw", lane.as_str()]).0
+        ),
+    ]
+}
+
+/// `debug thaw`: `thawed acme@2`, or that the lane was already running normally.
+pub(super) fn thaw(data: &Value) -> Vec<String> {
+    let lane = text(data, "lane");
+    if data.get("thawed").and_then(Value::as_bool) == Some(true) {
+        vec![format!("thawed {lane}")]
+    } else {
+        vec![format!("{lane} was not throttled or frozen")]
+    }
 }
 
 /// `lane gc`: removed lanes and port offsets.

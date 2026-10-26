@@ -1,6 +1,6 @@
-//! Windows versions of the Unix-only checks: verified termination instead of
-//! signals, exited-but-held processes as zombies, a spawned listener, and
-//! descendant tracking by parent links alone.
+//! Windows versions of the Unix-only checks: verified termination and resume
+//! instead of signals, exited-but-held processes as zombies, a spawned
+//! listener, and descendant tracking by parent links alone.
 
 use std::{
     io::{BufRead, BufReader},
@@ -196,5 +196,24 @@ fn tracker_follows_parent_links() -> Result<(), devlanes_sys::Error> {
             .any(|p| p.ppid == identity.pid && p.name.eq_ignore_ascii_case("PING.EXE"))
     }));
     assert!(tracker.live().any(|p| p.pid == identity.pid));
+    Ok(())
+}
+
+/// A verified resume reaches only the recorded process; one that is not
+/// suspended keeps running.
+#[test]
+fn verified_resume_rejects_recycled_identity() -> Result<(), devlanes_sys::Error> {
+    let child = sleeper();
+    let real = devlanes_sys::identity(child.0.id())?.expect("child identity");
+    let forged = ProcessIdentity {
+        start_time: real.start_time + 1,
+        ..real
+    };
+    assert_eq!(
+        devlanes_sys::resume_verified(&forged)?,
+        SignalOutcome::Mismatch
+    );
+    assert_eq!(devlanes_sys::resume_verified(&real)?, SignalOutcome::Sent);
+    assert!(devlanes_sys::matches(&real)?);
     Ok(())
 }

@@ -113,6 +113,10 @@ impl Unit for CoreUnit {
     fn renders_screen(&self) -> bool {
         self.unit.renders_screen()
     }
+    /// Delegates to the wrapped unit.
+    async fn set_power(&self, power: devlanes_core::Power) -> Result<(), devlanes_core::Error> {
+        self.unit.set_power(power).await
+    }
 }
 
 #[async_trait]
@@ -352,6 +356,8 @@ impl InfraEvent {
 
 /// Containers: shared and per-lane Compose services plus plain Docker containers.
 /// Implementations never stop containers implicitly; only the explicit calls do.
+/// The one implicit action is [`InfraProvider::pause_lane`] while a lane is frozen,
+/// and it never touches shared containers.
 #[async_trait]
 pub trait InfraProvider: Send + Sync {
     /// Host ports the lane's infra needs from the lane or project block.
@@ -398,6 +404,16 @@ pub trait InfraProvider: Send + Sync {
     /// runs, alongside it, for start progress; empty when the provider cannot tell.
     async fn progress(&self, _spec: &InfraSpec) -> Vec<devlanes_proto::PhaseContainer> {
         Vec::new()
+    }
+    /// Pauses the running containers that belong to this lane alone, while the lane
+    /// is frozen. Shared containers are never paused. Returns how many were paused.
+    async fn pause_lane(&self, _project: &str, _lane: u32) -> Result<usize, InfraError> {
+        Ok(0)
+    }
+    /// Unpauses the lane's own paused containers. Also called for every lane found
+    /// at daemon start, so containers a crashed daemon paused come back.
+    async fn unpause_lane(&self, _project: &str, _lane: u32) -> Result<usize, InfraError> {
+        Ok(0)
     }
 }
 
@@ -564,6 +580,17 @@ pub trait ProcessTable: Send + Sync {
         )
         .await;
     }
+    /// Continues the recorded process and its session members if a crashed
+    /// daemon left them frozen. Only verified identities are touched; a running
+    /// process is unaffected.
+    async fn resume(&self, _identity: ProcessIdentity) {}
+    /// [`Self::resume`] for one orphaned unit: its recorded `leader` and the
+    /// `members` recorded with it.
+    async fn resume_unit(&self, leader: ProcessIdentity, members: &[ProcessIdentity]) {
+        for identity in std::iter::once(leader).chain(members.iter().copied()) {
+            self.resume(identity).await;
+        }
+    }
 }
 
 /// [`ProcessTable`] over `devlanes-sys`; blocking reads run off the executor.
@@ -602,24 +629,18 @@ impl ProcessTable for SysProcesses {
     #[cfg(unix)]
     async fn terminate(&self, identity: ProcessIdentity, grace: Duration) {
         let signal_all = move |signal: devlanes_sys::Signal| {
-            let snapshot = devlanes_sys::processes().unwrap_or_default();
-            // Empty unless the leader itself still verifies: a dead leader's session
-            // ID may name someone else's session, so then only `identity` is tried.
-            let mut targets = devlanes_sys::session_members(&snapshot, &identity);
-            targets.retain(|p| p.pid != identity.pid);
             let mut alive = 0;
-            if matches!(
-                devlanes_sys::signal_verified(&identity, signal),
-                Ok(devlanes_sys::SignalOutcome::Sent)
-            ) {
-                alive += 1;
-            }
-            for member in targets {
+            for target in session_targets(identity) {
                 if matches!(
-                    devlanes_sys::signal_verified(&member.identity(), signal),
+                    devlanes_sys::signal_verified(&target, signal),
                     Ok(devlanes_sys::SignalOutcome::Sent)
                 ) {
                     alive += 1;
+                    // A process a crashed daemon left frozen acts on SIGTERM only
+                    // once continued.
+                    if signal != devlanes_sys::Signal::KILL {
+                        let _ = devlanes_sys::signal_verified(&target, devlanes_sys::Signal::CONT);
+                    }
                 }
             }
             alive
@@ -639,6 +660,64 @@ impl ProcessTable for SysProcesses {
         }
         let _ = tokio::task::spawn_blocking(move || signal_all(devlanes_sys::Signal::KILL)).await;
     }
+
+    /// SIGCONT to the verified session and the identity itself.
+    #[cfg(unix)]
+    async fn resume(&self, identity: ProcessIdentity) {
+        self.resume_unit(identity, &[]).await;
+    }
+
+    /// SIGCONT to the leader's and each member's verified session, from one
+    /// process snapshot; members first, so a job-control parent in the
+    /// leader's group never sees its children still stopped.
+    #[cfg(unix)]
+    async fn resume_unit(&self, leader: ProcessIdentity, members: &[ProcessIdentity]) {
+        let members = members.to_vec();
+        let _ = tokio::task::spawn_blocking(move || {
+            let snapshot = devlanes_sys::processes().unwrap_or_default();
+            for identity in members.into_iter().chain(std::iter::once(leader)) {
+                for target in session_targets_in(&snapshot, identity) {
+                    let _ = devlanes_sys::signal_verified(&target, devlanes_sys::Signal::CONT);
+                }
+            }
+        })
+        .await;
+    }
+
+    /// Resumes the process if it still verifies; a process that is not
+    /// suspended is left as it is.
+    #[cfg(windows)]
+    async fn resume(&self, identity: ProcessIdentity) {
+        let result =
+            tokio::task::spawn_blocking(move || devlanes_sys::resume_verified(&identity)).await;
+        if let Ok(Err(error)) = result {
+            tracing::debug!(%error, pid = identity.pid, "resuming a left-over process failed");
+        }
+    }
+}
+
+/// The recorded process followed by the other members of its session. The
+/// session is listed only while the leader itself still verifies: a dead
+/// leader's session ID may name someone else's session. Blocking.
+#[cfg(unix)]
+fn session_targets(identity: ProcessIdentity) -> Vec<ProcessIdentity> {
+    session_targets_in(&devlanes_sys::processes().unwrap_or_default(), identity)
+}
+
+/// [`session_targets`] from a snapshot the caller already took. Blocking.
+#[cfg(unix)]
+fn session_targets_in(
+    snapshot: &[devlanes_sys::ProcessInfo],
+    identity: ProcessIdentity,
+) -> Vec<ProcessIdentity> {
+    let mut targets = vec![identity];
+    targets.extend(
+        devlanes_sys::session_members(snapshot, &identity)
+            .into_iter()
+            .filter(|p| p.pid != identity.pid)
+            .map(|p| p.identity()),
+    );
+    targets
 }
 
 /// Validates a preset's opaque option block; `None` when the service has none.

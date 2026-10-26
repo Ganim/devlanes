@@ -56,5 +56,16 @@ error: seed is a configured task of acme@2; give exec another --name, or run the
 hint: devlanes run seed --lane acme@2
 error: the answer is larger than the 16 MiB message limit; ask for less: a smaller --tail or --budget, or one unit at a time
 error: the connection to the daemon closed before the answer arrived
+error: lane acme@2 has no running service to freeze
+hint: devlanes status --lane acme@2
+error: lane acme@2 is starting, stopping or running a task; retry when it is done
+hint: devlanes status --lane acme@2
+error: lane acme@2 runs keep_awake services (worker, queue), so it stays awake
+hint: set services.worker.keep_awake and services.queue.keep_awake to false in the project config to let it freeze
+error: lane acme@2 has units left running by a previous daemon (bg); they are not supervised, so the lane is not frozen
+hint: devlanes stop bg --lane acme@2
+error: lane acme@2 could not be frozen: api: operation not permitted; it runs normally
+error: this system cannot throttle processes; idle lanes are frozen after lanes.freeze_after instead
+error: lane acme@2 could not be thawed: api: no such process; it stays idle and devlanes retries
 error: the installed /etc/hosts helper is version 0.1.0, devlanes is 0.2.0
 hint: devlanes certs trust --hosts

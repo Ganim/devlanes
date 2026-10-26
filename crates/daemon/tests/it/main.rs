@@ -9,6 +9,7 @@ mod failures;
 mod fakes;
 mod folders;
 mod hosts;
+mod idle;
 mod lanes;
 mod leftovers;
 mod lifecycle;
@@ -151,6 +152,8 @@ pub struct Harness {
     pub infra: FakeInfra,
     pub processes: FakeProcesses,
     pub home: PathBuf,
+    /// The board the proxy would report traffic to.
+    pub idle: Arc<devlanes_daemon::idle::IdleBoard>,
     next_id: AtomicU64,
 }
 
@@ -212,6 +215,9 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     std::fs::create_dir_all(home).expect("home");
     let store = Store::open(home.join("state.db")).await.expect("store");
     let mut options = EngineOptions::new(home, home.join("d.sock"));
+    // The machine's TCP table holds whatever else runs; tests rely on what they do.
+    options.idle =
+        Arc::new(devlanes_daemon::idle::IdleBoard::default().without_connection_checks());
     options.watch = setup.watch;
     options.start_timeout = Duration::from_secs(10);
     options.idle_exit = setup.idle_exit;
@@ -222,6 +228,7 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
         options.user = user;
         options.dns_listen = "127.0.0.1:0".parse().expect("address");
     }
+    let idle = options.idle.clone();
     let engine = Engine::new(options, store, integ, CancellationToken::new());
     engine.reconcile().await.expect("reconcile");
     Harness {
@@ -230,6 +237,7 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
         infra,
         processes,
         home: home.to_path_buf(),
+        idle,
         next_id: AtomicU64::new(1),
     }
 }

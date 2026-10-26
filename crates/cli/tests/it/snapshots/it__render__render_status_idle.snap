@@ -1,0 +1,20 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+acme
+  LANE  BRANCH        STATE                 SERVICES  CPU   MEM        URL
+  0     main          running frozen 12m    2/2       9.0%  286.1 MiB  https://acme.localhost:8443
+  2     feat/billing  running throttled 3m  2/2       9.0%  286.1 MiB  https://acme-2.localhost:8443
+  3     fix/login     running               1/1       4.5%  143.1 MiB  https://acme-3.localhost:8443
+--- plain (exit 0)
+acme
+  LANE  BRANCH        STATE                 SERVICES  CPU   MEM        URL
+  0     main          running frozen 12m    2/2       9.0%  286.1 MiB  https://acme.localhost:8443
+  2     feat/billing  running throttled 3m  2/2       9.0%  286.1 MiB  https://acme-2.localhost:8443
+  3     fix/login     running               1/1       4.5%  143.1 MiB  https://acme-3.localhost:8443
+--- agent (exit 0)
+running acme@0 main 2/2 power=frozen
+running acme@2 feat/billing 2/2 power=throttled
+running acme@3 fix/login 1/1

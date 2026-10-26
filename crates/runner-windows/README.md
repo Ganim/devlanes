@@ -30,7 +30,7 @@ The `devlanes` binary dispatches `devlanes __console-ctrl <pid> <c|break>` to `c
 ## API
 
 - `WindowsRunner`: `spawn_unit` returns the concrete `WindowsUnit`, and `Runner::spawn` returns it as `Arc<dyn Unit>`. `with_shell`, `with_stderr`, `with_console_helper`, `with_track_interval` and `with_output_capacity` adjust the defaults.
-- `WindowsUnit`: implements `Unit`. Also provides `identity`, `processes`, `listening_ports`, `size`, `terminate`, `exit_report`, `wait_report` and `stop_with_report`.
+- `WindowsUnit`: implements `Unit`. Also provides `identity`, `processes`, `listening_ports`, `size`, `set_power`, `terminate`, `exit_report`, `wait_report` and `stop_with_report`.
 - `ExitReport`: exit code, stop details and the processes swept after the leader exited.
 - `SpawnError`: why a unit did not start, with a stable `code()` such as `shell_missing` or `unsafe_batch_argument`. Converted to `devlanes_core::Error::Io` with a `devlanes_core::SpawnRefusal` source that carries the code.
 - `spawn_foreground` and `shell_exit_code`: run a command on this process's console with the same resolution (the test command of `devlanes with`) and map its exit code the way a shell reports it.
@@ -61,6 +61,10 @@ A bare program name is looked up on the unit's `PATH` with `PATHEXT` (`.COM`, `.
 | `SIGKILL` | terminate the job |
 
 A graceful stop also posts `WM_CLOSE` to the members' visible windows, then sends one console event through the helper, which the supervisor does not wait for. In a pseudo console a `.cmd` shim asks "Terminate batch job (Y/N)?" after the event; once only `cmd.exe` is left, the runner answers `Y` once, which is not an escalation. Once only the console host is left, or at the timeout, the job is terminated; the report says whether the timeout was reached. A process ended by a console event exits with `STATUS_CONTROL_C_EXIT` (`0xC000013A`), which is reported as its code.
+
+## Idle units
+
+`set_power(Power::Frozen)` suspends every job member except the console host with `NtSuspendProcess`, reading the job again until no new member appears, and keeps each process handle open until the thaw, so every process is resumed once and a reused PID is never touched. `Power::Throttled` is Task Manager's efficiency mode: `IDLE_PRIORITY_CLASS` and EcoQoS on every member, also on members the supervisor's refresh finds later. `Power::Normal` resumes and restores each member's recorded priority class and power throttling (`NORMAL_PRIORITY_CLASS` and Windows' default for members that started while throttled). A process that cannot be resumed or restored keeps its handle, and the next `Normal` tries again. A stop puts a frozen unit back to `Normal` before sending Ctrl-C, Ctrl-Break or `WM_CLOSE`, which suspended threads would never handle. Working sets are not trimmed.
 
 ## Limitations
 

@@ -1,5 +1,5 @@
 //! The process table: snapshots, single lookups, held and verified handles,
-//! listening sockets and the boot id.
+//! listening sockets, established TCP connections and the boot id.
 //!
 //! A process's start time is its creation `FILETIME` as one `u64` (100 ns
 //! ticks since 1601 UTC), recorded once at creation, so clock changes never
@@ -21,8 +21,9 @@ use windows_sys::Win32::Foundation::{
     NO_ERROR, STILL_ACTIVE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
-    MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    GetExtendedTcpTable, MIB_TCP_STATE_ESTAB, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
+    MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_CLASS, TCP_TABLE_OWNER_PID_CONNECTIONS,
+    TCP_TABLE_OWNER_PID_LISTENER,
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -286,28 +287,45 @@ pub fn boot_id() -> io::Result<String> {
 /// TCP listeners (IPv4 and IPv6) owned by `pids`, as `(pid, address)`.
 pub fn listening_tcp(pids: &[u32]) -> io::Result<Vec<(u32, SocketAddr)>> {
     let mut sockets = Vec::new();
-    let v4 = tcp_table(AF_INET)?;
-    for row in
-        rows::<MIB_TCPROW_OWNER_PID>(&v4, std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table))
-    {
+    for row in v4_rows(TCP_TABLE_OWNER_PID_LISTENER)? {
         if pids.contains(&row.dwOwningPid) {
-            // The address is stored in network byte order.
-            let ip = Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes());
-            let addr = SocketAddrV4::new(ip, port(row.dwLocalPort));
-            sockets.push((row.dwOwningPid, SocketAddr::V4(addr)));
+            sockets.push((row.dwOwningPid, v4_addr(row.dwLocalAddr, row.dwLocalPort)));
         }
     }
-    let v6 = tcp_table(AF_INET6)?;
-    for row in
-        rows::<MIB_TCP6ROW_OWNER_PID>(&v6, std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table))
-    {
+    for row in v6_rows(TCP_TABLE_OWNER_PID_LISTENER)? {
         if pids.contains(&row.dwOwningPid) {
-            let ip = Ipv6Addr::from(row.ucLocalAddr);
-            let addr = SocketAddrV6::new(ip, port(row.dwLocalPort), 0, row.dwLocalScopeId);
-            sockets.push((row.dwOwningPid, SocketAddr::V6(addr)));
+            let addr = v6_addr(row.ucLocalAddr, row.dwLocalPort, row.dwLocalScopeId);
+            sockets.push((row.dwOwningPid, addr));
         }
     }
     Ok(sockets)
+}
+
+/// Every established TCP connection on the machine (IPv4 and IPv6), as
+/// `(local, remote)`, both ends of loopback connections included. A
+/// connection the kernel completed but no process has accepted yet is listed
+/// too, so connections to a suspended server show up.
+pub fn established_tcp() -> io::Result<Vec<(SocketAddr, SocketAddr)>> {
+    let established = MIB_TCP_STATE_ESTAB.cast_unsigned();
+    let mut connections = Vec::new();
+    // The connections table leaves listeners out, so it stays small.
+    for row in v4_rows(TCP_TABLE_OWNER_PID_CONNECTIONS)? {
+        if row.dwState == established {
+            connections.push((
+                v4_addr(row.dwLocalAddr, row.dwLocalPort),
+                v4_addr(row.dwRemoteAddr, row.dwRemotePort),
+            ));
+        }
+    }
+    for row in v6_rows(TCP_TABLE_OWNER_PID_CONNECTIONS)? {
+        if row.dwState == established {
+            connections.push((
+                v6_addr(row.ucLocalAddr, row.dwLocalPort, row.dwLocalScopeId),
+                v6_addr(row.ucRemoteAddr, row.dwRemotePort, row.dwRemoteScopeId),
+            ));
+        }
+    }
+    Ok(connections)
 }
 
 /// Opens `pid` with `access`; `None` when no process has that PID.
@@ -489,13 +507,46 @@ fn port(raw_port: u32) -> u16 {
     u16::from_be(raw_port as u16)
 }
 
-/// The listener table of one address family, as 8-aligned bytes holding a
+/// An IPv4 table entry's address and port, both in network byte order.
+fn v4_addr(raw_ip: u32, raw_port: u32) -> SocketAddr {
+    let ip = Ipv4Addr::from(raw_ip.to_ne_bytes());
+    SocketAddr::V4(SocketAddrV4::new(ip, port(raw_port)))
+}
+
+/// An IPv6 table entry's address, port in network byte order, and scope.
+fn v6_addr(raw_ip: [u8; 16], raw_port: u32, scope: u32) -> SocketAddr {
+    let ip = Ipv6Addr::from(raw_ip);
+    SocketAddr::V6(SocketAddrV6::new(ip, port(raw_port), 0, scope))
+}
+
+/// The IPv4 rows of the `class` table, one of the `TCP_TABLE_OWNER_PID_*`.
+fn v4_rows(class: TCP_TABLE_CLASS) -> io::Result<Vec<MIB_TCPROW_OWNER_PID>> {
+    let table = tcp_table(AF_INET, class)?;
+    Ok(rows(
+        &table,
+        std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table),
+    ))
+}
+
+/// The IPv6 rows of the `class` table, one of the `TCP_TABLE_OWNER_PID_*`.
+fn v6_rows(class: TCP_TABLE_CLASS) -> io::Result<Vec<MIB_TCP6ROW_OWNER_PID>> {
+    let table = tcp_table(AF_INET6, class)?;
+    Ok(rows(
+        &table,
+        std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table),
+    ))
+}
+
+/// The `class` table of one address family, as 8-aligned bytes holding a
 /// `MIB_TCP*TABLE_OWNER_PID`: a row count followed by rows.
-fn tcp_table(family: u16) -> io::Result<Vec<u64>> {
+fn tcp_table(family: u16, class: TCP_TABLE_CLASS) -> io::Result<Vec<u64>> {
     let mut bytes = 0_u32;
     for _ in 0..5 {
-        let mut buffer = vec![0_u64; (bytes as usize).div_ceil(8).max(1)];
-        bytes = (buffer.len() * 8) as u32;
+        // A quarter more than the size asked for, so connections opened
+        // between the size query and the read still fit.
+        let wanted = bytes as usize + bytes as usize / 4;
+        let mut buffer = vec![0_u64; wanted.div_ceil(8).max(1)];
+        bytes = u32::try_from(buffer.len() * 8).unwrap_or(u32::MAX);
         // SAFETY: `buffer` holds `bytes` writable, aligned bytes.
         let status = unsafe {
             GetExtendedTcpTable(
@@ -503,7 +554,7 @@ fn tcp_table(family: u16) -> io::Result<Vec<u64>> {
                 &raw mut bytes,
                 0,
                 u32::from(family),
-                TCP_TABLE_OWNER_PID_LISTENER,
+                class,
                 0,
             )
         };

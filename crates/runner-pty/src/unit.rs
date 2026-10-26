@@ -1,7 +1,7 @@
 //! Unit handle and the per-unit supervisor task that reaps, tracks and stops it.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt, io,
     os::fd::OwnedFd,
     sync::{
@@ -14,7 +14,8 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_core::{
-    Error, ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopSignal, TerminalSize, Unit,
+    Error, ExitOutcome, LaunchSpec, OutputChunk, Power, ProcessIdentity, StopSignal, TerminalSize,
+    Unit,
 };
 use devlanes_sys::{
     DescendantTracker, ListeningSocket, OpenFile, ProcessInfo, Signal, SignalOutcome,
@@ -23,7 +24,7 @@ use rustix::{fs::OFlags, io::Errno, process::WaitOptions};
 use tokio::{
     io::unix::AsyncFd,
     signal::unix::{SignalKind, signal},
-    sync::{broadcast, mpsc, watch},
+    sync::{broadcast, mpsc, oneshot, watch},
     task::{self, AbortHandle},
     time::{self, Instant, MissedTickBehavior},
 };
@@ -34,6 +35,8 @@ use crate::{ExitSweep, PtyRunner, output, snapshot, spawn};
 const EXIT_POLL: Duration = Duration::from_millis(50);
 /// Poll period between SIGKILL rounds of the final sweep.
 const SWEEP_POLL: Duration = Duration::from_millis(25);
+/// Most scans a freeze makes while looking for processes forked during it.
+const FREEZE_PASSES: usize = 5;
 
 /// Everything known about a finished unit. Shared by all waiters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +91,9 @@ struct Inner {
     leader_reaped: AtomicBool,
     /// Set when the supervisor ended without publishing a real report.
     crashed: AtomicBool,
-    stops: mpsc::UnboundedSender<StopRequest>,
+    requests: mpsc::UnboundedSender<Request>,
+    /// Changed only by the supervisor.
+    power: Mutex<PowerState>,
     exit: watch::Sender<Option<ExitReport>>,
     timing: Timing,
     /// Lets tests kill the supervisor to exercise the crash fallback.
@@ -125,6 +130,25 @@ impl Timing {
 struct StopRequest {
     signal: Signal,
     timeout: Duration,
+}
+
+/// Work the supervisor does on behalf of a handle.
+#[derive(Debug)]
+enum Request {
+    Stop(StopRequest),
+    Power {
+        level: Power,
+        reply: oneshot::Sender<Result<(), Error>>,
+    },
+}
+
+/// The power level the supervisor keeps the process tree at.
+#[derive(Debug, Default)]
+struct PowerState {
+    level: Power,
+    /// `(pid, start_time)` of the processes already stopped (`Frozen`) or put in
+    /// the background band (`Throttled`), so ticks only act on new ones.
+    applied: BTreeSet<(u32, u64)>,
 }
 
 /// Stop progress owned by the supervisor.
@@ -192,7 +216,7 @@ pub(crate) async fn spawn(runner: &PtyRunner, spec: LaunchSpec) -> Result<Arc<Pt
         }
     };
 
-    let (stops, requests) = mpsc::unbounded_channel();
+    let (request_tx, requests) = mpsc::unbounded_channel();
     let inner = Arc::new(Inner {
         identity,
         pty,
@@ -213,7 +237,8 @@ pub(crate) async fn spawn(runner: &PtyRunner, spec: LaunchSpec) -> Result<Arc<Pt
         reaped: Mutex::new(None),
         leader_reaped: AtomicBool::new(false),
         crashed: AtomicBool::new(false),
-        stops,
+        requests: request_tx,
+        power: Mutex::new(PowerState::default()),
         exit: watch::channel(None).0,
         timing: Timing {
             track_interval: runner.track_interval,
@@ -251,14 +276,17 @@ fn async_master(fd: OwnedFd) -> io::Result<AsyncFd<OwnedFd>> {
     unsafe { AsyncFd::register(fd) }.map_err(|error| error.into_parts().1)
 }
 
-/// Owns the unit lifecycle: reaping, periodic tracking, stop escalation and the
-/// post-exit drain and sweep. Stops run here so a cancelled `stop()` caller cannot
-/// abandon an escalation halfway.
+/// Owns the unit lifecycle: reaping, periodic tracking, stop escalation, power
+/// levels and the post-exit drain and sweep. Stops and power changes run here so
+/// a cancelled caller cannot abandon one halfway.
+///
+/// The leader is only waited for with `WEXITED`, so the SIGCHLD a frozen leader
+/// raises when it stops just wakes the loop and is never taken for an exit.
 async fn supervise(
     inner: Arc<Inner>,
     _publish: PublishOnDrop,
     mut sigchld: tokio::signal::unix::Signal,
-    mut requests: mpsc::UnboundedReceiver<StopRequest>,
+    mut requests: mpsc::UnboundedReceiver<Request>,
     mut output_done: watch::Receiver<bool>,
 ) {
     let timing = inner.timing;
@@ -276,18 +304,32 @@ async fn supervise(
             _ = sigchld.recv() => {}
             _ = tick.tick() => {
                 inner.refresh_logged(timing.track_interval / 2).await;
+                inner.extend_power().await;
             }
-            Some(request) = requests.recv() => {
-                let deadline = Instant::now() + request.timeout;
-                match &mut stopping {
-                    // A repeated stop can only shorten the grace period.
-                    Some(current) => current.deadline = current.deadline.min(deadline),
-                    None => {
-                        inner.signal_all(request.signal).await;
-                        stopping = Some(Stopping { signal: request.signal, deadline, escalated: false });
+            Some(request) = requests.recv() => match request {
+                Request::Stop(request) => {
+                    let deadline = Instant::now() + request.timeout;
+                    match &mut stopping {
+                        // A repeated stop can only shorten the grace period.
+                        Some(current) => current.deadline = current.deadline.min(deadline),
+                        None => {
+                            // SIGCONT follows the stop signal and resumes a frozen
+                            // tree, so later ticks must not stop it again.
+                            *lock(&inner.power) = PowerState::default();
+                            inner.signal_all(request.signal).await;
+                            stopping = Some(Stopping { signal: request.signal, deadline, escalated: false });
+                        }
                     }
                 }
-            }
+                Request::Power { level, reply } => {
+                    let result = if stopping.is_some() {
+                        Err(Error::Exited)
+                    } else {
+                        inner.apply_power(level).await
+                    };
+                    let _ = reply.send(result);
+                }
+            },
             () = until(deadline) => {
                 inner.signal_all(Signal::KILL).await;
                 if let Some(current) = &mut stopping {
@@ -296,6 +338,14 @@ async fn supervise(
             }
         }
     };
+    // Requests queued from here on fail with `Exited` at once instead of waiting
+    // out the drain, and a stop sent now waits for the report.
+    drop(requests);
+    // Members that outlive the leader must run again, whether the sweep kills
+    // them or leaves them running.
+    if let Err(error) = inner.apply_power(Power::Normal).await {
+        tracing::warn!(%error, pid = inner.identity.pid, "resuming leftovers failed");
+    }
 
     if let Some(current) = &mut stopping {
         // Members that outlive the leader get the rest of the grace period.
@@ -382,6 +432,34 @@ fn raw_pid(pid: u32) -> Option<rustix::process::Pid> {
 /// Locks a std mutex, ignoring poisoning: the guarded data stays consistent per call.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Stops (`Frozen`) or moves to the macOS background band (`Throttled`) every live
+/// process in `processes` that is not in `applied` yet, and records it there.
+/// Returns how many were new. Blocking.
+fn apply_to_new(
+    processes: &[ProcessInfo],
+    applied: &mut BTreeSet<(u32, u64)>,
+    level: Power,
+) -> usize {
+    let mut new = 0;
+    for process in processes.iter().filter(|p| !p.zombie) {
+        if !applied.insert((process.pid, process.start_time)) {
+            continue;
+        }
+        new += 1;
+        let identity = process.identity();
+        let result = match level {
+            Power::Frozen => devlanes_sys::signal_verified(&identity, Signal::STOP),
+            #[cfg(target_os = "macos")]
+            Power::Throttled => devlanes_sys::set_background(&identity, true),
+            _ => continue,
+        };
+        if let Err(error) = result {
+            tracing::debug!(%error, pid = process.pid, ?level, "power change failed");
+        }
+    }
+    new
 }
 
 /// Leader state seen without reaping.
@@ -558,6 +636,125 @@ impl Inner {
                 Err(error) => tracing::debug!(%error, pid = process.pid, "signal failed"),
             }
         }
+    }
+
+    /// Moves the tree to `level` from the supervisor; see [`PtyUnit::set_power`].
+    async fn apply_power(self: &Arc<Self>, level: Power) -> Result<(), Error> {
+        if level == Power::Normal && lock(&self.power).level == Power::Normal {
+            return Ok(());
+        }
+        let inner = Arc::clone(self);
+        blocking(move || inner.apply_power_blocking(level)).await
+    }
+
+    /// Blocking body of [`Inner::apply_power`]. Failures to reach single processes
+    /// are logged and skipped: one process of another user must not keep the rest
+    /// of the tree from changing.
+    fn apply_power_blocking(&self, level: Power) {
+        let mut state = lock(&self.power);
+        // Asking for `Normal` again must not resume a process the user stopped
+        // with Ctrl-Z in an attached terminal.
+        if level == Power::Normal && state.level == Power::Normal {
+            return;
+        }
+        if state.level == Power::Frozen && level != Power::Frozen {
+            self.resume_blocking();
+        }
+        state.applied.clear();
+        match level {
+            Power::Frozen => self.freeze_blocking(&mut state.applied),
+            Power::Throttled => {
+                // Scanned, because the tracker is still empty right after spawn.
+                let processes = self
+                    .refresh_blocking(Duration::ZERO)
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(%error, "process snapshot failed while throttling");
+                        lock(&self.tracker).processes().cloned().collect()
+                    });
+                apply_to_new(&processes, &mut state.applied, Power::Throttled);
+            }
+            Power::Normal => {
+                // Frozen may have followed Throttled, so the band is cleared either way.
+                #[cfg(target_os = "macos")]
+                {
+                    let live: Vec<ProcessInfo> = lock(&self.tracker).live().cloned().collect();
+                    for process in &live {
+                        if let Err(error) = devlanes_sys::set_background(&process.identity(), false)
+                        {
+                            tracing::debug!(%error, pid = process.pid, "clearing background failed");
+                        }
+                    }
+                }
+            }
+        }
+        state.level = level;
+    }
+
+    /// Sends SIGSTOP to the session's process group and to every tracked process,
+    /// then scans again and stops processes forked in between, until a scan finds
+    /// none or [`FREEZE_PASSES`] scans were made.
+    fn freeze_blocking(&self, stopped: &mut BTreeSet<(u32, u64)>) {
+        // Until reaped, the leader's PID and therefore its group ID cannot be
+        // recycled. Group members the tracker has not seen yet stop here too.
+        if !self.leader_reaped.load(Ordering::Acquire)
+            && let Some(pid) = raw_pid(self.identity.pid)
+        {
+            let _ = rustix::process::kill_process_group(pid, Signal::STOP);
+        }
+        for _ in 0..FREEZE_PASSES {
+            let processes = self
+                .refresh_blocking(Duration::ZERO)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "process snapshot failed while freezing");
+                    lock(&self.tracker).processes().cloned().collect()
+                });
+            if apply_to_new(&processes, stopped, Power::Frozen) == 0 {
+                break;
+            }
+        }
+    }
+
+    /// Sends SIGCONT to the session's process group and every tracked process.
+    /// Uses the last snapshot: nothing in a frozen tree forks, and ticks keep
+    /// scanning while it is frozen.
+    fn resume_blocking(&self) {
+        // Children first: a job-control shell in the leader's group that wakes
+        // before its jobs would reap their stopped status and keep them stopped.
+        let leader = self.identity.pid;
+        let live: Vec<ProcessInfo> = lock(&self.tracker).live().cloned().collect();
+        for process in live.iter().filter(|process| process.pgid != leader) {
+            if let Err(error) = devlanes_sys::signal_verified(&process.identity(), Signal::CONT) {
+                tracing::debug!(%error, pid = process.pid, "resume failed");
+            }
+        }
+        if !self.leader_reaped.load(Ordering::Acquire)
+            && let Some(pid) = raw_pid(leader)
+        {
+            let _ = rustix::process::kill_process_group(pid, Signal::CONT);
+        }
+        // The group signal covers the rest while the leader is unreaped; after
+        // that, its former members are reached one by one.
+        for process in live.iter().filter(|process| process.pgid == leader) {
+            if let Err(error) = devlanes_sys::signal_verified(&process.identity(), Signal::CONT) {
+                tracing::debug!(%error, pid = process.pid, "resume failed");
+            }
+        }
+    }
+
+    /// Applies the current level to processes the last tick found, so a process
+    /// forked while frozen or throttled does not run at full speed.
+    async fn extend_power(self: &Arc<Self>) {
+        if lock(&self.power).level == Power::Normal {
+            return;
+        }
+        let inner = Arc::clone(self);
+        let _ = blocking(move || {
+            let live: Vec<ProcessInfo> = lock(&inner.tracker).live().cloned().collect();
+            let mut state = lock(&inner.power);
+            let level = state.level;
+            apply_to_new(&live, &mut state.applied, level);
+        })
+        .await;
     }
 
     /// SIGKILLs live tracked processes until none remain or the sweep times out.
@@ -783,7 +980,9 @@ impl PtyUnit {
             timeout: policy.timeout,
         };
         // A closed channel means the supervisor ended; only a crash leaves work undone.
-        if self.inner.stops.send(request).is_err() && self.inner.crashed.load(Ordering::SeqCst) {
+        if self.inner.requests.send(Request::Stop(request)).is_err()
+            && self.inner.crashed.load(Ordering::SeqCst)
+        {
             return self.stop_without_supervisor(request).await;
         }
         let bound = policy
@@ -793,6 +992,38 @@ impl PtyUnit {
             Ok(report) => report,
             Err(_) => self.settle_overdue_stop(signal).await,
         }
+    }
+
+    /// Moves the unit's process tree to `power`, through the supervisor.
+    ///
+    /// `Frozen` sends SIGSTOP to the session's process group and to every tracked
+    /// process, rescanning a few times for processes forked meanwhile; processes
+    /// found by later ticks are stopped too. `Normal` sends SIGCONT the same way
+    /// and on macOS takes every tracked process out of the background band.
+    /// `Throttled` puts every tracked process, and those found later, in the
+    /// macOS background band (`PRIO_DARWIN_BG`), resuming a frozen tree first;
+    /// other systems return `Unsupported` and change nothing. A stopping or
+    /// exited unit returns `Exited`. Cancelling this future does not cancel the
+    /// change. A stop works on a frozen unit, because SIGCONT follows its signal.
+    pub async fn set_power(&self, power: Power) -> Result<(), Error> {
+        if cfg!(not(target_os = "macos")) && power == Power::Throttled {
+            return Err(Error::Unsupported(
+                "throttling needs the macOS background band".into(),
+            ));
+        }
+        if self.inner.leader_reaped.load(Ordering::Acquire) || self.inner.exit.borrow().is_some() {
+            return Err(Error::Exited);
+        }
+        let (reply, result) = oneshot::channel();
+        let request = Request::Power {
+            level: power,
+            reply,
+        };
+        if self.inner.requests.send(request).is_err() {
+            return Err(Error::Exited);
+        }
+        // A dropped reply means the supervisor finished with the request queued.
+        result.await.unwrap_or(Err(Error::Exited))
     }
 
     /// Runs when a stop outlived the supervisor's own worst case. The leader is reaped
@@ -933,6 +1164,11 @@ impl Unit for PtyUnit {
     /// See [`PtyUnit::wait_report`].
     async fn wait(&self) -> Result<ExitOutcome, Error> {
         Ok(self.wait_report().await?.outcome)
+    }
+
+    /// See [`PtyUnit::set_power`].
+    async fn set_power(&self, power: Power) -> Result<(), Error> {
+        PtyUnit::set_power(self, power).await
     }
 
     /// The first call returns a receiver created before the first read, so it sees

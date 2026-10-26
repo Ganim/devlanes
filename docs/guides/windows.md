@@ -98,6 +98,10 @@ Windows has no POSIX signals. Console programs see Ctrl-C and Ctrl-Break, so `st
 
 A unit whose signal is sent as something else gets a launch note that says so. A stop also asks the unit's visible windows to close (`WM_CLOSE`), for desktop apps that do not watch their console. Whatever still runs when `stop.timeout` ends is terminated. A process ended by a console event reports `interrupted by Ctrl-C or Ctrl-Break`, because Windows gives both the same exit code.
 
+## Idle lanes
+
+A throttled lane runs in efficiency mode, as Task Manager sets it, and a frozen lane's processes are suspended; devlanes does not trim their memory. [Lane lifecycle](lifecycle.md#windows) has the details.
+
 ## Long paths
 
 Worktrees with deep `node_modules` trees can pass Windows' 260-character path limit, and Git then fails to check out or remove files. Let Git for Windows use long paths:

@@ -51,7 +51,7 @@ pub fn write_completions(
 fn kind_of(id: &str) -> Option<CompletionKind> {
     Some(match id {
         "unit" | "units" | "target" => CompletionKind::Unit,
-        "lane" | "status_lane" | "clean_lane" => CompletionKind::Lane,
+        "lane" | "status_lane" | "clean_lane" | "freeze_lane" | "thaw_lane" => CompletionKind::Lane,
         "task" => CompletionKind::Task,
         "project" => CompletionKind::Project,
         "connect_host" | "disconnect_host" => CompletionKind::Host,

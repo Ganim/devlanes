@@ -1,11 +1,13 @@
 //! A realistic fake daemon: a 45-unit monorepo lane with containers, a
 //! starting lane, an idle lane, a lane whose worktree is gone, a second
-//! project and a third whose config does not load.
+//! project and a third whose config does not load; [`idle_lanes`] freezes
+//! and throttles the first two.
 
 use std::collections::BTreeMap;
 
 use devlanes_proto::{
-    Actor, ActorKind, ContainerSummary, LaneSummary, LogLine, ORPHANED, RpcError, UnitSummary,
+    Actor, ActorKind, ContainerSummary, LanePower, LaneSummary, LogLine, ORPHANED, RpcError,
+    UnitSummary,
 };
 use devlanes_tui::{
     DaemonMetrics, LaneMetrics, Metrics, SystemMetrics, UnitMetrics,
@@ -362,6 +364,48 @@ pub fn lanes() -> Vec<LaneSummary> {
         shop_feature,
         billing,
     ]
+}
+
+/// [`lanes`] after a quiet stretch: `acme@0` frozen with its own containers
+/// paused, `acme@1` started and throttled. Their failed, orphaned and busy
+/// units are settled first, since the daemon never idles a lane with those.
+pub fn idle_lanes() -> Vec<LaneSummary> {
+    let mut lanes = lanes();
+    for lane in &mut lanes {
+        let level = match lane.reference.as_str() {
+            "acme@0" => "frozen",
+            "acme@1" => "throttled",
+            _ => continue,
+        };
+        lane.state = "running".into();
+        lane.power = Some(LanePower {
+            level: level.into(),
+            since_ms: NOW_MS - 720_000,
+            last_activity_ms: Some(NOW_MS - 1_620_000),
+            last_activity: Some("proxy".into()),
+        });
+        for unit in &mut lane.units {
+            unit.reason = None;
+            if unit.kind == "task" {
+                unit.state = "exited".into();
+                unit.exit_code = Some(0);
+                continue;
+            }
+            if unit.state == "idle" {
+                continue;
+            }
+            unit.state = "ready".into();
+            unit.exit_code = None;
+            unit.orphaned_since_ms = None;
+            unit.power = Some(level.into());
+        }
+        if level == "frozen" {
+            for container in lane.containers.iter_mut().filter(|c| !c.shared) {
+                container.state = Some("paused".into());
+            }
+        }
+    }
+    lanes
 }
 
 /// The Docker log lines a container's pane shows, as the TUI writes them.

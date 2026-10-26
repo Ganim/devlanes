@@ -521,7 +521,8 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       "stop": {
         "signal": "SIGINT",
         "timeout": "15000ms"
-      }
+      },
+      "keep_awake": true
     },
     "ai-gateway": {
       "run": "uv run uvicorn app:main --port ${{ self.port }} --reload",

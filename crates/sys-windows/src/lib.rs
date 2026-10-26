@@ -1,7 +1,8 @@
 //! Safe wrappers over the Win32 calls devlanes needs on Windows: security
 //! identifiers and descriptors, private directories, named pipes, the process
-//! table, job objects, process creation, consoles, windows, the registry, the
-//! shell's `ShellExecuteExW`, file identity, certificate stores and socket options.
+//! table, job objects, process creation, suspension and efficiency mode,
+//! consoles, windows, the registry, the shell's `ShellExecuteExW`, file
+//! identity, certificate stores and socket options.
 //!
 //! The wrappers hold no policy and produce no user-facing text; the crates that
 //! call them decide what a result means. Every call blocks, so async callers use
@@ -38,6 +39,8 @@ pub mod job;
 pub mod net;
 #[allow(unsafe_code)]
 pub mod pipe;
+#[allow(unsafe_code)]
+pub mod power;
 #[allow(unsafe_code)]
 pub mod proc;
 #[allow(unsafe_code)]

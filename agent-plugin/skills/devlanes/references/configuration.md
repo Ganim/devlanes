@@ -44,6 +44,7 @@ services:
 - `infra.setup` and `infra.teardown` entries take only `run`.
 - A multi-line `run` string is a shell script. Without `cwd`, `run` starts at the lane's worktree root.
 - `autostart: false` keeps a service out of a plain `devlanes start` when no `default` profile exists; naming the service or its tag still starts it. `autostart` also takes an expression, such as `${{ lane.index == 0 }}`, evaluated per lane.
+- `keep_awake: true` on a worker, queue consumer, scheduler or tunnel (`stripe listen`) keeps its whole lane from being throttled or frozen while it runs. Without it, a lane with no requests, connections or commands is frozen after `lanes.freeze_after` (15 minutes by default) and a waiting worker stalls until something resumes the lane.
 - `replicas: N` runs N instances (`replica.index` counts from 1), each with its own port.
 - `stop: { signal: SIGINT, timeout: 15s }` replaces the default SIGTERM and 10 s grace period before the process tree is killed.
 - `pty: false` uses pipes instead of a terminal. `hidden: true` keeps the port off machines connected with `devlanes remote connect`.

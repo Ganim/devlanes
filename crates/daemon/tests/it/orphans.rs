@@ -98,6 +98,12 @@ async fn a_crashed_daemons_units_stay_running_as_orphans() {
             processes.killed.lock().expect("lock").is_empty(),
             "nothing is killed at startup"
         );
+        // The crashed daemon may have left them frozen.
+        let mut resumed = processes.resumed.lock().expect("lock").clone();
+        resumed.sort_unstable();
+        let mut survivors = vec![pids["web"], pids["worker"]];
+        survivors.sort_unstable();
+        assert_eq!(resumed, survivors, "survivors are resumed at startup");
         let summary = lane(&h, &main).await;
         assert_eq!(summary.state, "running");
         let web = unit(&summary, "web");

@@ -1402,7 +1402,8 @@ fn entry_line(
             (look.glyph, look.tone)
         }
         (None, Some(container)) => {
-            let (glyph, tone, _) = super::list::container_look(page.app, container);
+            let lane = page.app.lanes.iter().find(|l| l.reference == entry.lane);
+            let (glyph, tone, _) = super::list::container_look(page.app, lane, container);
             (glyph, tone)
         }
         (None, None) => (theme.glyph(Glyph::Ready), Tone::Ok),

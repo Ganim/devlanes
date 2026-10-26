@@ -78,6 +78,12 @@ impl Inner {
                     .as_ref()
                     .is_some_and(|r| r.id == run.lane_id)
             });
+            // The previous daemon may have crashed while the lane was frozen;
+            // nothing would ever thaw these processes otherwise.
+            self.integ
+                .processes
+                .resume_unit(run.process, &members)
+                .await;
             let Some((project, lane)) = lane else {
                 // Kept unfinished: the next startup that knows its lane shows it,
                 // and `daemon reset-state` terminates it.

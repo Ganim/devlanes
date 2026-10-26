@@ -1,0 +1,10 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+thawed acme@2
+--- plain (exit 0)
+thawed acme@2
+--- agent (exit 0)
+thawed acme@2

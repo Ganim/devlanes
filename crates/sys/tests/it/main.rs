@@ -144,6 +144,35 @@ fn listening_ports_of_pid_set() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// A connection the listener never accepted is in the kernel's table, from both
+/// ends.
+#[test]
+fn tcp_connections_include_unaccepted() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let server = listener.local_addr()?;
+    let client = std::net::TcpStream::connect(server)?;
+    let local = client.local_addr()?;
+    let connections = devlanes_sys::tcp_connections()?;
+    let expected = [
+        devlanes_sys::TcpConnection {
+            local,
+            remote: server,
+        },
+        devlanes_sys::TcpConnection {
+            local: server,
+            remote: local,
+        },
+    ];
+    for connection in expected {
+        assert!(
+            connections.contains(&connection),
+            "{connection:?} missing from {connections:?}"
+        );
+    }
+    assert!(connections.is_sorted());
+    Ok(())
+}
+
 /// A child holding a pipe's write end or a PTY slave is found by its open file;
 /// unrelated processes are not.
 #[cfg(unix)]

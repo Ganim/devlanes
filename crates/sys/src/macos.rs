@@ -1,14 +1,18 @@
 //! macOS backend over libproc, sysctl and `lsof`.
 
 use std::{
-    ffi::c_int,
+    ffi::{CStr, c_int},
     io,
     mem::{MaybeUninit, size_of},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     process::{Command, Stdio},
     ptr,
 };
 
-use crate::{Error, ListeningSocket, ProcessInfo, lsof, raw_pid};
+use crate::{
+    Error, ListeningSocket, ProcessIdentity, ProcessInfo, SignalOutcome, TcpConnection, lsof,
+    raw_pid,
+};
 
 /// `sizeof(struct proc_bsdinfo)`, the exact length libproc must return.
 const BSDINFO_SIZE: c_int = size_of::<libc::proc_bsdinfo>() as c_int;
@@ -409,6 +413,224 @@ pub(crate) fn max_nofile(hard: Option<u64>) -> Result<u64, Error> {
     Ok(hard.map_or(per_process, |hard| hard.min(per_process)))
 }
 
+/// Sets or clears `PRIO_DARWIN_BG` with `setpriority(PRIO_DARWIN_PROCESS)` after
+/// checking the PID still has the recorded start time. The kernel allows it for
+/// processes of the same user, in both directions.
+pub(crate) fn set_background(
+    identity: &ProcessIdentity,
+    background: bool,
+) -> Result<SignalOutcome, Error> {
+    let Some(info) = process(identity.pid)? else {
+        return Ok(SignalOutcome::Gone);
+    };
+    if info.start_time != identity.start_time {
+        return Ok(SignalOutcome::Mismatch);
+    }
+    if info.zombie {
+        return Ok(SignalOutcome::Gone);
+    }
+    let value = if background { libc::PRIO_DARWIN_BG } else { 0 };
+    // SAFETY: setpriority takes only integers and reads or writes no memory of
+    // this process.
+    let rc = unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, identity.pid, value) };
+    if rc == 0 {
+        return Ok(SignalOutcome::Sent);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(SignalOutcome::Gone);
+    }
+    Err(error.into())
+}
+
+/// Reads `net.inet.tcp.pcblist_n`, the TCP table `netstat` prints, and keeps
+/// established connections.
+pub(crate) fn tcp_connections() -> Result<Vec<TcpConnection>, Error> {
+    parse_pcblist(&sysctl_bytes(c"net.inet.tcp.pcblist_n")?)
+}
+
+/// Reads a variable-length sysctl, retrying when it grew between the size query
+/// and the read.
+fn sysctl_bytes(name: &CStr) -> io::Result<Vec<u8>> {
+    for _ in 0..8 {
+        let mut len = 0_usize;
+        // SAFETY: the name is NUL-terminated and a null buffer with a writable
+        // length only asks the kernel for the size it needs.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                ptr::null_mut(),
+                &raw mut len,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // The kernel's estimate already has headroom; a little more saves a retry.
+        let mut buffer = vec![0_u8; len + len / 8 + 4096];
+        let mut written = buffer.len();
+        // SAFETY: `buffer` and `written` describe writable bytes the kernel fills
+        // at most up to `written`; no new value is supplied.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                &raw mut written,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 {
+            buffer.truncate(written.min(buffer.len()));
+            return Ok(buffer);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENOMEM) {
+            return Err(error);
+        }
+    }
+    Err(io::Error::other(format!(
+        "sysctl {} kept growing",
+        name.to_string_lossy()
+    )))
+}
+
+/// `sizeof(struct xinpgen)`, the record that opens and closes `pcblist_n`.
+/// Items are never this short, which is how `netstat` finds the end.
+const XINPGEN_SIZE: usize = 24;
+/// `xgn_kind` of `struct xinpcb_n` and `struct xtcpcb_n` (`<sys/socketvar.h>`).
+const XSO_INPCB: u32 = 0x10;
+const XSO_TCPCB: u32 = 0x20;
+/// Offsets in `struct xinpcb_n`, laid out under `#pragma pack(4)` in
+/// `<netinet/in_pcb.h>`. Ports are in network byte order.
+const INP_FPORT: usize = 16;
+const INP_LPORT: usize = 18;
+const INP_VFLAG: usize = 44;
+const INP_FADDR: usize = 48;
+const INP_LADDR: usize = 64;
+/// End of the local address, the last field read.
+const XINPCB_READ: usize = 80;
+/// `inp_vflag` bits.
+const INP_IPV4: u8 = 0x1;
+const INP_IPV6: u8 = 0x2;
+/// Offset of `t_state` in `struct xtcpcb_n` (`<netinet/tcp_var.h>`, pack(4)).
+const T_STATE: usize = 36;
+/// `TCPS_ESTABLISHED` from `<netinet/tcp_fsm.h>`.
+const TCPS_ESTABLISHED: i32 = 4;
+
+/// Builds the error for a `pcblist_n` buffer that does not have the expected shape.
+fn pcblist_malformed(detail: impl Into<String>) -> Error {
+    Error::Malformed {
+        source_name: "net.inet.tcp.pcblist_n",
+        detail: detail.into(),
+    }
+}
+
+/// Reads a native-endian `u32` at `at`.
+fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    let end = at.checked_add(4)?;
+    Some(u32::from_ne_bytes(bytes.get(at..end)?.try_into().ok()?))
+}
+
+/// Parses the output of `net.inet.tcp.pcblist_n` and returns its established
+/// connections.
+///
+/// The buffer is an `xinpgen` header, then one group of items per PCB
+/// (`xinpcb_n`, `xsocket_n`, two `xsockbuf_n`, `xsockstat_n`, `xtcpcb_n`), then a
+/// closing `xinpgen`. Every item starts with its length and kind and is padded to
+/// 8 bytes. A group's addresses come from its `xinpcb_n` and its state from the
+/// `xtcpcb_n` that ends it; other kinds are skipped by length, as `netstat` does.
+pub(crate) fn parse_pcblist(bytes: &[u8]) -> Result<Vec<TcpConnection>, Error> {
+    let header = read_u32(bytes, 0).ok_or_else(|| pcblist_malformed("no header"))? as usize;
+    if header < XINPGEN_SIZE || header > bytes.len() {
+        return Err(pcblist_malformed(format!("header length {header}")));
+    }
+    let mut at = header.next_multiple_of(8);
+    // The kernel writes no closing record when the table is empty.
+    if at >= bytes.len() {
+        return Ok(Vec::new());
+    }
+    // Addresses of the PCB whose `xtcpcb_n` has not arrived yet; the inner
+    // `None` is a PCB of neither family.
+    let mut pending: Option<Option<TcpConnection>> = None;
+    let mut connections = Vec::new();
+    loop {
+        let len = read_u32(bytes, at)
+            .ok_or_else(|| pcblist_malformed(format!("truncated at {at}")))?
+            as usize;
+        if len <= XINPGEN_SIZE {
+            if pending.is_some() {
+                return Err(pcblist_malformed("PCB without TCP state at the end"));
+            }
+            return Ok(connections);
+        }
+        let item = at
+            .checked_add(len)
+            .and_then(|end| bytes.get(at..end))
+            .ok_or_else(|| pcblist_malformed(format!("item of {len} bytes at {at} overruns")))?;
+        match read_u32(item, 4) {
+            Some(XSO_INPCB) => {
+                if pending.is_some() {
+                    return Err(pcblist_malformed(format!("PCB at {at} follows a PCB")));
+                }
+                pending = Some(inpcb_addresses(item)?);
+            }
+            Some(XSO_TCPCB) => {
+                let addresses = pending
+                    .take()
+                    .ok_or_else(|| pcblist_malformed(format!("TCP state at {at} without PCB")))?;
+                let state = read_u32(item, T_STATE)
+                    .ok_or_else(|| pcblist_malformed(format!("short TCP state at {at}")))?;
+                if state.cast_signed() == TCPS_ESTABLISHED
+                    && let Some(connection) = addresses
+                {
+                    connections.push(connection);
+                }
+            }
+            _ => {}
+        }
+        at = at
+            .checked_add(len.next_multiple_of(8))
+            .ok_or_else(|| pcblist_malformed("offset overflow"))?;
+    }
+}
+
+/// Decodes the local and foreign address of one `xinpcb_n`. An IPv4 address sits
+/// in the last four bytes of the `in6_addr` union.
+fn inpcb_addresses(item: &[u8]) -> Result<Option<TcpConnection>, Error> {
+    let field = |at: usize, len: usize| {
+        item.get(at..at + len)
+            .ok_or_else(|| pcblist_malformed(format!("PCB of {} bytes", item.len())))
+    };
+    field(0, XINPCB_READ)?;
+    let port = |at: usize| field(at, 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let address = |at: usize, vflag: u8| -> Result<Option<IpAddr>, Error> {
+        let raw: [u8; 16] = field(at, 16)?
+            .try_into()
+            .map_err(|_| pcblist_malformed("address"))?;
+        Ok(if vflag & INP_IPV4 != 0 {
+            Some(IpAddr::V4(Ipv4Addr::new(
+                raw[12], raw[13], raw[14], raw[15],
+            )))
+        } else if vflag & INP_IPV6 != 0 {
+            Some(IpAddr::V6(Ipv6Addr::from(raw)))
+        } else {
+            None
+        })
+    };
+    let vflag = field(INP_VFLAG, 1)?[0];
+    let (Some(local), Some(remote)) = (address(INP_LADDR, vflag)?, address(INP_FADDR, vflag)?)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(TcpConnection {
+        local: SocketAddr::new(local, port(INP_LPORT)?),
+        remote: SocketAddr::new(remote, port(INP_FPORT)?),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,5 +643,226 @@ mod tests {
         let (stat, start_time) = kinfo(pid).expect("own kinfo");
         assert_eq!(start_time, live.start_time);
         assert_ne!(u32::from(stat), libc::SZOMB);
+    }
+
+    /// Scheduling priority `ps` reports for `pid`; 4 (`MAXPRI_THROTTLE`) in the
+    /// background band. `getpriority(PRIO_DARWIN_PROCESS)` cannot read it back:
+    /// XNU answers with the caller's own state whatever PID is passed.
+    fn priority_of(pid: u32) -> u32 {
+        let output = Command::new("/bin/ps")
+            .args(["-o", "pri=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("priority")
+    }
+
+    /// A same-user child can be put in the background band and taken out again,
+    /// and a recycled identity is refused.
+    #[test]
+    fn background_round_trip() {
+        /// Owns the test child.
+        struct Reaped(std::process::Child);
+        impl Drop for Reaped {
+            /// Kills and reaps the child even when an assertion failed.
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Reaped(
+            Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn sleep"),
+        );
+        let identity = crate::identity(child.0.id())
+            .expect("lookup")
+            .expect("child identity");
+        let normal = priority_of(identity.pid);
+        assert_ne!(normal, 4);
+        assert_eq!(
+            set_background(&identity, true).expect("set"),
+            SignalOutcome::Sent
+        );
+        assert_eq!(priority_of(identity.pid), 4);
+        assert_eq!(
+            set_background(&identity, false).expect("clear"),
+            SignalOutcome::Sent
+        );
+        assert_eq!(priority_of(identity.pid), normal);
+        let forged = ProcessIdentity {
+            start_time: identity.start_time + 1,
+            ..identity
+        };
+        assert_eq!(
+            set_background(&forged, true).expect("mismatch"),
+            SignalOutcome::Mismatch
+        );
+        assert_eq!(priority_of(identity.pid), normal);
+    }
+
+    /// Appends one item padded to 8 bytes, with its length and kind filled in.
+    fn item(buffer: &mut Vec<u8>, kind: u32, mut body: Vec<u8>) {
+        let len = u32::try_from(body.len()).expect("small item");
+        body[0..4].copy_from_slice(&len.to_ne_bytes());
+        body[4..8].copy_from_slice(&kind.to_ne_bytes());
+        buffer.extend_from_slice(&body);
+        buffer.resize(buffer.len().next_multiple_of(8), 0);
+    }
+
+    /// An `xinpgen` record.
+    fn xinpgen(buffer: &mut Vec<u8>) {
+        let mut body = vec![0_u8; XINPGEN_SIZE];
+        body[0..4].copy_from_slice(&(XINPGEN_SIZE as u32).to_ne_bytes());
+        buffer.extend_from_slice(&body);
+    }
+
+    /// One PCB group in kernel order: `xinpcb_n` (104 bytes), `xsocket_n`, two
+    /// `xsockbuf_n`, `xsockstat_n` and `xtcpcb_n`. The items the parser skips
+    /// are filler of odd sizes, so padding to 8 bytes is exercised.
+    fn pcb(buffer: &mut Vec<u8>, local: SocketAddr, remote: SocketAddr, state: i32) {
+        let mut inpcb = vec![0_u8; 104];
+        inpcb[INP_LPORT..INP_LPORT + 2].copy_from_slice(&local.port().to_be_bytes());
+        inpcb[INP_FPORT..INP_FPORT + 2].copy_from_slice(&remote.port().to_be_bytes());
+        for (at, addr) in [(INP_LADDR, local.ip()), (INP_FADDR, remote.ip())] {
+            match addr {
+                IpAddr::V4(v4) => {
+                    inpcb[INP_VFLAG] = INP_IPV4;
+                    inpcb[at + 12..at + 16].copy_from_slice(&v4.octets());
+                }
+                IpAddr::V6(v6) => {
+                    inpcb[INP_VFLAG] = INP_IPV6;
+                    inpcb[at..at + 16].copy_from_slice(&v6.octets());
+                }
+            }
+        }
+        item(buffer, XSO_INPCB, inpcb);
+        item(buffer, 0x1, vec![0xAA; 117]);
+        item(buffer, 0x2, vec![0xAA; 36]);
+        item(buffer, 0x4, vec![0xAA; 36]);
+        item(buffer, 0x8, vec![0xAA; 165]);
+        let mut tcpcb = vec![0_u8; 244];
+        tcpcb[T_STATE..T_STATE + 4].copy_from_slice(&state.to_ne_bytes());
+        item(buffer, XSO_TCPCB, tcpcb);
+    }
+
+    /// Socket address shorthand for fixtures.
+    fn addr(text: &str) -> SocketAddr {
+        text.parse().expect("socket address")
+    }
+
+    /// Established IPv4 and IPv6 connections are decoded; listeners and other
+    /// states are dropped.
+    #[test]
+    fn pcblist_fixture() {
+        let mut buffer = Vec::new();
+        xinpgen(&mut buffer);
+        pcb(&mut buffer, addr("127.0.0.1:4000"), addr("0.0.0.0:0"), 1);
+        pcb(
+            &mut buffer,
+            addr("127.0.0.1:4000"),
+            addr("127.0.0.1:51000"),
+            TCPS_ESTABLISHED,
+        );
+        pcb(
+            &mut buffer,
+            addr("[::1]:5432"),
+            addr("[::1]:52000"),
+            TCPS_ESTABLISHED,
+        );
+        pcb(
+            &mut buffer,
+            addr("10.0.0.2:443"),
+            addr("10.0.0.9:60000"),
+            10,
+        );
+        xinpgen(&mut buffer);
+        assert_eq!(
+            parse_pcblist(&buffer).expect("parse"),
+            [
+                TcpConnection {
+                    local: addr("127.0.0.1:4000"),
+                    remote: addr("127.0.0.1:51000"),
+                },
+                TcpConnection {
+                    local: addr("[::1]:5432"),
+                    remote: addr("[::1]:52000"),
+                },
+            ]
+        );
+
+        // The kernel skips the closing record when the table is empty.
+        let mut empty = Vec::new();
+        xinpgen(&mut empty);
+        assert_eq!(parse_pcblist(&empty).expect("empty"), []);
+    }
+
+    /// Truncated or inconsistent buffers are errors, never a partial table.
+    #[test]
+    fn pcblist_rejects_malformed_input() {
+        let mut full = Vec::new();
+        xinpgen(&mut full);
+        pcb(
+            &mut full,
+            addr("127.0.0.1:4000"),
+            addr("127.0.0.1:51000"),
+            TCPS_ESTABLISHED,
+        );
+        xinpgen(&mut full);
+        assert!(parse_pcblist(&full).is_ok());
+        let trailer = full.len() - XINPGEN_SIZE;
+        for cut in [0, 3, 30, 100, trailer - 50, trailer] {
+            assert!(
+                matches!(parse_pcblist(&full[..cut]), Err(Error::Malformed { .. })),
+                "cut at {cut}"
+            );
+        }
+
+        let mut overrun = full.clone();
+        overrun[XINPGEN_SIZE..XINPGEN_SIZE + 4].copy_from_slice(&u32::MAX.to_ne_bytes());
+        assert!(matches!(
+            parse_pcblist(&overrun),
+            Err(Error::Malformed { .. })
+        ));
+
+        let mut short_pcb = Vec::new();
+        xinpgen(&mut short_pcb);
+        item(&mut short_pcb, XSO_INPCB, vec![0; 40]);
+        xinpgen(&mut short_pcb);
+        assert!(matches!(
+            parse_pcblist(&short_pcb),
+            Err(Error::Malformed { .. })
+        ));
+
+        let mut orphan_state = Vec::new();
+        xinpgen(&mut orphan_state);
+        item(&mut orphan_state, XSO_TCPCB, vec![0; 244]);
+        xinpgen(&mut orphan_state);
+        assert!(matches!(
+            parse_pcblist(&orphan_state),
+            Err(Error::Malformed { .. })
+        ));
+    }
+
+    /// The live table parses and lists both ends of a loopback connection.
+    #[test]
+    fn pcblist_live() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let client =
+            std::net::TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let local = client.local_addr().expect("client addr");
+        let server = listener.local_addr().expect("server addr");
+        let connections = tcp_connections().expect("pcblist_n");
+        assert!(connections.contains(&TcpConnection {
+            local,
+            remote: server
+        }));
+        assert!(connections.contains(&TcpConnection {
+            local: server,
+            remote: local
+        }));
     }
 }

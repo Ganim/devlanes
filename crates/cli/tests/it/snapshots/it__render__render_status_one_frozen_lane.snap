@@ -1,0 +1,21 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+acme
+  LANE  BRANCH  STATE               SERVICES  CPU   MEM        URL
+  0     main    running frozen 30m  1/1       4.5%  143.1 MiB  https://acme.localhost:8443
+
+  UNIT  STATE   PORT   CPU   MEM        URL
+  api   frozen  20103  4.5%  143.1 MiB  https://api.acme-2.localhost:8443
+--- plain (exit 0)
+acme
+  LANE  BRANCH  STATE               SERVICES  CPU   MEM        URL
+  0     main    running frozen 30m  1/1       4.5%  143.1 MiB  https://acme.localhost:8443
+
+  UNIT  STATE  PORT   CPU   MEM        URL
+  api   ready  20103  4.5%  143.1 MiB  https://api.acme-2.localhost:8443
+--- agent (exit 0)
+running acme@0 main 1/1 power=frozen
+ready acme@2:api power=frozen http://127.0.0.1:20103 https://api.acme-2.localhost:8443 default=20103

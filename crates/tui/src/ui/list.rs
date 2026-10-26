@@ -17,8 +17,16 @@ use crate::text::{self, clean};
 use crate::theme::{Glyph, Tone};
 use crate::tree::{self, ContainerTone, Row, RowId, Section};
 
-/// Unit states the glyph says on its own.
-const SILENT: [&str; 5] = ["ready", "running", "stopped", "idle", "not run"];
+/// Unit states the glyph says on its own; the lane title names an idle lane's level.
+const SILENT: [&str; 7] = [
+    "ready",
+    "running",
+    "frozen",
+    "throttled",
+    "stopped",
+    "idle",
+    "not run",
+];
 
 /// The list box and its rows.
 pub fn render(app: &App, frame: &mut Frame, boxed: Rect, area: Rect) {
@@ -43,10 +51,16 @@ pub fn render(app: &App, frame: &mut Frame, boxed: Rect, area: Rect) {
     // title and shows its status in the pane.
     let bold = Style::new().add_modifier(Modifier::BOLD);
     let mut name = vec![Span::raw(" ")];
+    // `@0 frozen`: an idle lane's level, dim, as its units still serve.
+    let power = lane
+        .power
+        .as_ref()
+        .map(|power| Span::styled(format!(" {}", clean(&power.level)), theme.quiet()));
     match lane.index {
         Some(index) if app.project_lanes().len() > 1 => {
             let counts = tree::counts(lane);
             name.push(Span::styled(format!("@{index}"), bold));
+            name.extend(power);
             name.push(Span::styled(
                 format!(" · {}/{} up", counts.up, counts.total),
                 theme.quiet(),
@@ -57,6 +71,7 @@ pub fn render(app: &App, frame: &mut Frame, boxed: Rect, area: Rect) {
             if let Some(index) = index {
                 name.push(Span::raw(format!(" @{index}")));
             }
+            name.extend(power);
         }
     }
     // A lane on its way somewhere says so; settled states need no word.
@@ -248,9 +263,9 @@ fn row_line(app: &App, lane: &LaneSummary, item: &Row, width: usize) -> Line<'st
             let Some(container) = app.find_container(lane, name) else {
                 return Line::from(format!("{indent}{}", clean(name)));
             };
-            let (glyph, tone, word) = container_look(app, &container);
+            let (glyph, tone, word) = container_look(app, Some(lane), &container);
             let mut right = Vec::new();
-            if tone != Tone::Ok {
+            if !matches!(tone, Tone::Ok | Tone::Frozen) {
                 right.push(Span::styled(word, theme.tone(tone)));
             }
             // Hidden in `infra.hidden`: listed, dimmed, as hidden services.
@@ -291,13 +306,17 @@ fn leaf(
     ]
 }
 
-/// A container's glyph, tone and state word.
+/// A container's glyph, tone and state word. `lane` is the lane it is shown
+/// in: a frozen lane's own containers are paused with it, shared ones never are.
 pub(crate) fn container_look(
     app: &App,
+    lane: Option<&LaneSummary>,
     container: &devlanes_proto::ContainerSummary,
 ) -> (&'static str, Tone, String) {
     let theme = &app.theme;
-    match tree::container_tone(container) {
+    let frozen = tree::frozen_with(lane, container);
+    match tree::container_tone(lane, container) {
+        ContainerTone::Up if frozen => (theme.glyph(Glyph::Frozen), Tone::Frozen, "frozen".into()),
         ContainerTone::Up => (theme.glyph(Glyph::Ready), Tone::Ok, "up".into()),
         ContainerTone::Busy => (
             theme.spinner(app.spin),
@@ -368,8 +387,8 @@ fn unit_line(
         }
     }
     // The name takes the family color; a unit that does not run, or a
-    // hidden one, is dimmed.
-    let quiet = look.tone == Tone::Quiet || unit.hidden;
+    // hidden one, is dimmed. A throttled unit's glyph is quiet, yet it runs.
+    let quiet = (look.tone == Tone::Quiet && unit.power.is_none()) || unit.hidden;
     let left = leaf(
         app,
         item,
@@ -404,7 +423,7 @@ fn members_summary(app: &App, lane: &LaneSummary, members: &[RowId]) -> Vec<Span
             }
             RowId::Container(name) => {
                 if let Some(container) = app.find_container(lane, name) {
-                    let (_, tone, word) = container_look(app, &container);
+                    let (_, tone, word) = container_look(app, Some(lane), &container);
                     add(word, tone);
                 }
             }
@@ -413,7 +432,7 @@ fn members_summary(app: &App, lane: &LaneSummary, members: &[RowId]) -> Vec<Span
     }
     // Healthy and quiet first, problems last where the eye ends.
     counts.sort_by_key(|(_, tone, _)| match tone {
-        Tone::Ok => 0,
+        Tone::Ok | Tone::Frozen => 0,
         Tone::Busy => 1,
         Tone::Quiet => 2,
         Tone::Attention => 3,
@@ -462,6 +481,8 @@ pub fn lane_summary(app: &App, lane: &LaneSummary) -> Vec<Span<'static>> {
                 );
             } else if lane.state == "failed" {
                 push("start failed".into(), theme.tone(Tone::Failure));
+            } else if let Some(power) = &lane.power {
+                push(clean(&power.level), theme.quiet());
             } else {
                 push("running".into(), theme.quiet());
             }

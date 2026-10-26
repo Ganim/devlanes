@@ -1989,6 +1989,25 @@
           ],
           "markdownDescription": "Hostnames the devlanes HTTPS proxy routes to this service, so `https://<host>` reaches it. One entry or a list; an entry is a hostname or a mapping with `host` and optional `port` (a named port), `fallback` and `host_header`. A `*.` wildcard matches subdomains, and an exact host wins over it. The first non-wildcard host becomes `public_url`, non-wildcard hosts join the lane's `DEVLANES_ORIGINS`, and having hosts makes the default `ready` a TCP check. Keep them under `${{ lane.domain }}` so lanes do not collide."
         },
+        "keep_awake": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Templated_boolean",
+              "description": "",
+              "examples": [],
+              "markdownDescription": ""
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "While this service runs, devlanes never throttles or freezes its lane, whatever `lanes.throttle_after` and `lanes.freeze_after` in the user config say. Set it on workers, queue consumers, schedulers and tunnels that do work without inbound requests, which a frozen lane would otherwise stall. One such service keeps the whole lane awake. An expression is evaluated for each lane, such as `${{ lane.index == 0 }}` to keep only the main lane awake. Defaults to false.",
+          "examples": [
+            true,
+            false
+          ],
+          "markdownDescription": "While this service runs, devlanes never throttles or freezes its lane, whatever `lanes.throttle_after` and `lanes.freeze_after` in the user config say. Set it on workers, queue consumers, schedulers and tunnels that do work without inbound requests, which a frozen lane would otherwise stall. One such service keeps the whole lane awake. An expression is evaluated for each lane, such as `${{ lane.index == 0 }}` to keep only the main lane awake. Defaults to false."
+        },
         "name": {
           "description": "Label shown in the TUI and human output instead of the service key; any text, spaces allowed, with ` #N` added per replica. Commands, profiles and `${{ services.<key> }}` keep using the key.",
           "examples": [

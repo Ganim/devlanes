@@ -58,7 +58,7 @@ pub fn health_from_inspect(inspect: &ContainerInspectResponse) -> InspectHealth 
         ContainerStateStatusEnum::RUNNING => {
             match state.health.as_ref().and_then(|health| health.status) {
                 Some(HealthStatusEnum::HEALTHY) => Health::Healthy,
-                Some(HealthStatusEnum::UNHEALTHY) => Health::Unhealthy,
+                Some(HealthStatusEnum::UNHEALTHY) => unhealthy_status(inspect),
                 Some(HealthStatusEnum::STARTING) => Health::Starting,
                 _ => {
                     return InspectHealth {
@@ -78,6 +78,47 @@ pub fn health_from_inspect(inspect: &ContainerInspectResponse) -> InspectHealth 
     InspectHealth {
         health,
         needs_probe: false,
+    }
+}
+
+/// Docker's default `Healthcheck.Retries`, used when the config leaves it at 0.
+const DEFAULT_HEALTH_RETRIES: i64 = 3;
+
+/// Reads a running container whose Docker health says `unhealthy`.
+///
+/// Docker sets `unhealthy` when it stops the health monitor on pause, keeping the
+/// failing streak, and the status stays until the next check after the unpause.
+/// Only a streak of `retries` failed checks makes a container really unhealthy.
+/// Below that, a successful check in the log means the container was healthy when
+/// it was paused, so it counts as healthy again right away; without one it was
+/// still starting.
+fn unhealthy_status(inspect: &ContainerInspectResponse) -> Health {
+    let retries = inspect
+        .config
+        .as_ref()
+        .and_then(|config| config.healthcheck.as_ref())
+        .and_then(|check| check.retries)
+        .filter(|retries| *retries > 0)
+        .unwrap_or(DEFAULT_HEALTH_RETRIES);
+    let Some(health) = inspect
+        .state
+        .as_ref()
+        .and_then(|state| state.health.as_ref())
+    else {
+        return Health::Unhealthy;
+    };
+    if health.failing_streak.unwrap_or(retries) >= retries {
+        return Health::Unhealthy;
+    }
+    let passed_before = health
+        .log
+        .iter()
+        .flatten()
+        .any(|result| result.exit_code == Some(0));
+    if passed_before {
+        Health::Healthy
+    } else {
+        Health::Starting
     }
 }
 
@@ -124,7 +165,9 @@ pub async fn tcp_probe(port: u16, connect_timeout: Duration, settle: Duration) -
 
 #[cfg(test)]
 mod tests {
-    use bollard::models::{ContainerState, Health as DockerHealth};
+    use bollard::models::{
+        ContainerConfig, ContainerState, Health as DockerHealth, HealthConfig, HealthcheckResult,
+    };
     use tokio::{io::AsyncWriteExt, net::TcpListener};
 
     use super::*;
@@ -191,6 +234,66 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// A running container that Docker calls `unhealthy`, with `retries` in its
+    /// healthcheck config (`None` leaves the config out), the failing streak, and
+    /// the exit codes of the checks in its log.
+    fn unhealthy(retries: Option<i64>, streak: i64, log: &[i64]) -> Health {
+        let mut response = inspect(
+            ContainerStateStatusEnum::RUNNING,
+            Some(HealthStatusEnum::UNHEALTHY),
+        );
+        response.config = retries.map(|retries| ContainerConfig {
+            healthcheck: Some(HealthConfig {
+                retries: Some(retries),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        if let Some(health) = response
+            .state
+            .as_mut()
+            .and_then(|state| state.health.as_mut())
+        {
+            health.failing_streak = Some(streak);
+            health.log = Some(
+                log.iter()
+                    .map(|code| HealthcheckResult {
+                        exit_code: Some(*code),
+                        ..Default::default()
+                    })
+                    .collect(),
+            );
+        }
+        health_from_inspect(&response).health
+    }
+
+    /// `unhealthy` after an unpause is a real failure only once the failing streak
+    /// reaches the configured retries, or Docker's default of 3.
+    #[test]
+    fn unhealthy_below_retries_comes_from_a_pause() {
+        // Healthy before the pause, with or without failed checks since.
+        assert_eq!(unhealthy(None, 0, &[0]), Health::Healthy);
+        assert_eq!(unhealthy(None, 2, &[0, 1, 1]), Health::Healthy);
+        assert_eq!(unhealthy(Some(0), 2, &[0, 1, 1]), Health::Healthy);
+        assert_eq!(unhealthy(Some(5), 4, &[0, 1, 1, 1, 1]), Health::Healthy);
+        // Paused before any check passed.
+        assert_eq!(unhealthy(None, 0, &[]), Health::Starting);
+        assert_eq!(unhealthy(None, 1, &[1]), Health::Starting);
+        // Enough failed checks.
+        assert_eq!(unhealthy(None, 3, &[0, 1, 1, 1]), Health::Unhealthy);
+        assert_eq!(unhealthy(Some(1), 1, &[0, 1]), Health::Unhealthy);
+        let paused = inspect(
+            ContainerStateStatusEnum::PAUSED,
+            Some(HealthStatusEnum::UNHEALTHY),
+        );
+        assert_eq!(
+            health_from_inspect(&paused).health,
+            Health::Other {
+                state: "paused".into()
+            }
+        );
     }
 
     #[test]

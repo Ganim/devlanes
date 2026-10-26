@@ -1,8 +1,8 @@
 //! Linux backend over procfs.
 
-use std::{collections::HashSet, fs, io, os::unix::fs::MetadataExt, path::Path};
+use std::{collections::HashSet, fs, io, net::SocketAddr, os::unix::fs::MetadataExt, path::Path};
 
-use crate::{Error, ListeningSocket, ProcessInfo, procfs};
+use crate::{Error, ListeningSocket, ProcessInfo, TcpConnection, procfs};
 
 /// Builds a [`Error::Malformed`] for one procfs file.
 fn malformed(source_name: &'static str, detail: impl Into<String>) -> Error {
@@ -90,6 +90,43 @@ pub(crate) fn listening_tcp(pids: &[u32]) -> Result<Vec<ListeningSocket>, Error>
     }
     let inodes: HashSet<u64> = owners.iter().map(|(inode, _)| *inode).collect();
     let mut sockets = Vec::new();
+    for row in tcp_rows()? {
+        if !row.listening || !inodes.contains(&row.inode) {
+            continue;
+        }
+        for (inode, pid) in &owners {
+            if *inode == row.inode {
+                sockets.push(ListeningSocket {
+                    pid: *pid,
+                    addr: row.local,
+                });
+            }
+        }
+    }
+    Ok(sockets)
+}
+
+/// Established rows of both TCP tables. IPv4-mapped addresses of dual-stack
+/// sockets are reported as IPv4, as macOS and Windows report them.
+pub(crate) fn tcp_connections() -> Result<Vec<TcpConnection>, Error> {
+    Ok(tcp_rows()?
+        .into_iter()
+        .filter(|row| row.established)
+        .map(|row| TcpConnection {
+            local: canonical(row.local),
+            remote: canonical(row.remote),
+        })
+        .collect())
+}
+
+/// Turns `[::ffff:a.b.c.d]:port` into `a.b.c.d:port`.
+fn canonical(addr: SocketAddr) -> SocketAddr {
+    SocketAddr::new(addr.ip().to_canonical(), addr.port())
+}
+
+/// Reads `/proc/net/tcp` and `/proc/net/tcp6` of this network namespace.
+fn tcp_rows() -> Result<Vec<procfs::TcpRow>, Error> {
+    let mut rows = Vec::new();
     for (path, ipv6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
         let content = match fs::read_to_string(path) {
             Ok(content) => content,
@@ -97,21 +134,9 @@ pub(crate) fn listening_tcp(pids: &[u32]) -> Result<Vec<ListeningSocket>, Error>
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
-        for row in procfs::parse_tcp_table(&content, ipv6) {
-            if !row.listening || !inodes.contains(&row.inode) {
-                continue;
-            }
-            for (inode, pid) in &owners {
-                if *inode == row.inode {
-                    sockets.push(ListeningSocket {
-                        pid: *pid,
-                        addr: row.local,
-                    });
-                }
-            }
-        }
+        rows.extend(procfs::parse_tcp_table(&content, ipv6));
     }
-    Ok(sockets)
+    Ok(rows)
 }
 
 /// Classifies a descriptor by `fstat`: character devices by rdev, pipes by inode.

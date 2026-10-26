@@ -18,9 +18,9 @@
 │   │   terminal.marks                        auto│         background (`COLORFGBG`); otherwise the terminal's 16  │105│
 │   │   updates.check                         true│         colors.                                                │   │
 │   │   lanes.data_dir                     default│  dark   Always use the true-color palette made for a dark      │118│
+│   │   lanes.throttle_after                    5m│         background.                                            │   │
+│   │   lanes.freeze_after                     15m│ ▌light  Always use the true-color palette made for a light     │131│
 │   │   daemon.exit_when_idle                 true│         background.                                            │   │
-│   │                                             │ ▌light  Always use the true-color palette made for a light     │131│
-│   │                                             │         background.                                            │   │
 │   │                                             │  ansi   Use only the terminal's 16 named colors, so the TUI    │144│
 │   │                                             │         follows the terminal's color scheme.                   │   │
 │   │                                             │                                                                │157│
@@ -60,9 +60,9 @@
 17: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 60-112 dim, 115 #9a6b00, 119 #8f8a7f
 18: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 60-66 dim, 115 #9a6b00, 119 #8f8a7f
 19: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 43-49 dim, 50 #8f8a7f, 52 #9a6b00, 60-108 dim, 115 #9a6b00, 119 #8f8a7f
-20: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 60-70 dim, 115 #9a6b00, 119 #8f8a7f
-21: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 52 #9a6b00, 53-59 bold #9a6b00, 60-109 dim, 115 #9a6b00, 119 #8f8a7f
-22: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 60-70 dim, 115 #9a6b00, 119 #8f8a7f
+20: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 48-49 dim, 50 #8f8a7f, 60-70 dim, 115 #9a6b00, 119 #8f8a7f
+21: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 47-49 dim, 50 #8f8a7f, 52 #9a6b00, 53-59 bold #9a6b00, 60-109 dim, 115 #9a6b00, 119 #8f8a7f
+22: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 60-70 dim, 115 #9a6b00, 119 #8f8a7f
 23: 0 #8f8a7f, 1-3 on #f7e7b4, 4 #9a6b00, 50 #8f8a7f, 52 #9a6b00, 60-110 dim, 115 #9a6b00, 119 #8f8a7f
 24: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 60-95 dim, 115 #9a6b00, 119 #8f8a7f
 25: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 115 #9a6b00, 119 #8f8a7f

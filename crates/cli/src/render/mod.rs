@@ -76,7 +76,7 @@ impl Ctx<'_> {
             "ready" | "running" | "ok" | "applied" | "exited" => "32",
             "failed" | "fail" | "error" => "31",
             "starting" | "stopping" | "warn" | "reconnecting" | "unassigned" | "orphaned" => "33",
-            // Queued, idle and stopped units are dim.
+            // Queued, idle, throttled, frozen and stopped units are dim.
             _ => "2",
         };
         self.paint(text, sgr)
@@ -187,6 +187,8 @@ pub(crate) fn result(method: Method, data: &Value, cx: &Ctx<'_>) -> Vec<String> 
         Method::Wait => lanes::wait(data, cx),
         Method::Errors => lanes::errors(data, cx),
         Method::Why => lanes::why(data, cx),
+        Method::DebugFreeze => lanes::freeze(data, cx),
+        Method::DebugThaw => lanes::thaw(data),
         Method::Hosts => lanes::hosts(data, cx),
         Method::Logs | Method::InfraLogs => other::logs(data, cx),
         Method::Run => other::run(data, cx),
@@ -379,6 +381,22 @@ pub(crate) fn duration(ms: u64) -> String {
         format!("{minutes}m {seconds}s")
     } else {
         format!("{seconds}s")
+    }
+}
+
+/// Time since an epoch-milliseconds instant in its largest unit: `40s`, `12m`,
+/// `3h` or `2d`.
+pub(crate) fn age(since_ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let seconds = now.saturating_sub(since_ms) / 1000;
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m", seconds / 60),
+        3600..86_400 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
     }
 }
 

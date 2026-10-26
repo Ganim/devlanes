@@ -61,8 +61,13 @@ pub fn render(app: &App, frame: &mut Frame, boxed: Rect, area: Rect) {
             let facts = container
                 .as_ref()
                 .map(|c| {
-                    let (_, tone, word) = container_look(app, c);
-                    let mut facts = vec![Span::styled(word, theme.tone(tone))];
+                    let (_, tone, word) = container_look(app, Some(lane), c);
+                    let quiet = if tone == Tone::Frozen {
+                        Tone::Quiet
+                    } else {
+                        tone
+                    };
+                    let mut facts = vec![Span::styled(word, theme.tone(quiet))];
                     if c.shared {
                         facts.push(Span::styled("shared", theme.quiet()));
                     }
@@ -185,7 +190,14 @@ fn render_box(
     // before the mode on the right goes.
     let mut facts = facts;
     let room = usize::from(boxed.width).saturating_sub(super::spans_width(&right) + 10);
-    while facts.len() > 1 && super::spans_width(&title) + super::spans_width(&facts) + 3 > room {
+    // The first fact (the state, with an idle unit's glyph before it) always stays.
+    let first = facts
+        .iter()
+        .position(|span| span.content == " · ")
+        .unwrap_or(facts.len())
+        .max(1);
+    while facts.len() > first && super::spans_width(&title) + super::spans_width(&facts) + 3 > room
+    {
         facts.truncate(facts.len().saturating_sub(2));
     }
     let mut left = vec![Span::raw(" ")];
@@ -480,12 +492,16 @@ fn container_mode_text(app: &App, attached: &Attached) -> Option<Vec<Span<'stati
     }
 }
 
-/// `ready · https://api.acme.localhost`, `failed · exit 1` for the title:
-/// the state, then the first URL, else the first port.
+/// `ready · https://api.acme.localhost`, `failed · exit 1`, `❄ frozen · :41000`
+/// for the title: the state, then the first URL, else the first port.
 fn unit_facts_title(app: &App, unit: &UnitSummary) -> Vec<Span<'static>> {
     let theme = &app.theme;
     let look = unit_look(theme, unit, app.spin);
-    let mut facts = vec![Span::styled(look.word.clone(), theme.tone(look.tone))];
+    let idle = matches!(look.word.as_str(), "frozen" | "throttled");
+    let mut facts = vec![Span::styled(
+        look.word.clone(),
+        theme.tone(if idle { look.word_tone } else { look.tone }),
+    )];
     if !look.detail.is_empty() {
         let tone = if look.tone == Tone::Failure {
             Tone::Failure
@@ -503,7 +519,16 @@ fn unit_facts_title(app: &App, unit: &UnitSummary) -> Vec<Span<'static>> {
     if let Some(address) = address.filter(|_| is_active_state(&unit.state)) {
         facts.push(Span::styled(clean(&address), theme.quiet()));
     }
-    dotted(app, facts)
+    let mut facts = dotted(app, facts);
+    // `❄ frozen`: the glyph names the idle level, the word stays dim like a
+    // healthy state's, since a request thaws the unit.
+    if idle {
+        facts.insert(
+            0,
+            Span::styled(format!("{} ", look.glyph), theme.tone(look.tone)),
+        );
+    }
+    facts
 }
 
 /// Whether a unit's process runs, so its address answers.
@@ -724,6 +749,33 @@ fn clock(ms: u64) -> String {
     format!("{:02}:{:02} UTC", minutes / 60, minutes % 60)
 }
 
+/// `frozen since 10:42 UTC, last activity a request at 10:27 UTC`: when an
+/// idle lane reached its level and what last kept it awake.
+fn idle_fact(power: &devlanes_proto::LanePower) -> String {
+    let mut text = format!("{} since {}", clean(&power.level), clock(power.since_ms));
+    let what = power
+        .last_activity
+        .as_deref()
+        .map(|activity| match activity {
+            "proxy" => "a request".to_owned(),
+            "connection" => "a connection".to_owned(),
+            "cpu" => "CPU use".to_owned(),
+            "command" => "a command".to_owned(),
+            "start" => "a start".to_owned(),
+            "stop" => "a stop".to_owned(),
+            other => clean(other),
+        });
+    match (what, power.last_activity_ms) {
+        (Some(what), Some(ms)) => {
+            text.push_str(&format!(", last activity {what} at {}", clock(ms)));
+        }
+        (Some(what), None) => text.push_str(&format!(", last activity {what}")),
+        (None, Some(ms)) => text.push_str(&format!(", last activity at {}", clock(ms))),
+        (None, None) => {}
+    }
+    text
+}
+
 /// A task that has not run: what `task.list` says about it.
 fn task_lines(app: &App, lane: &LaneSummary, name: &str, width: usize) -> Vec<Line<'static>> {
     let theme = &app.theme;
@@ -908,7 +960,7 @@ fn members_table(
                 let Some(container) = app.find_container(lane, name) else {
                     continue;
                 };
-                let (glyph, tone, word) = container_look(app, &container);
+                let (glyph, tone, word) = container_look(app, Some(lane), &container);
                 (
                     glyph,
                     tone,
@@ -935,7 +987,11 @@ fn members_table(
                 ),
                 Span::styled(
                     format!("{word:<9}"),
-                    theme.tone(if tone == Tone::Ok { Tone::Quiet } else { tone }),
+                    theme.tone(if matches!(tone, Tone::Ok | Tone::Frozen) {
+                        Tone::Quiet
+                    } else {
+                        tone
+                    }),
                 ),
                 Span::raw(format!(" {cpu:>5} {memory:>6}  ")),
                 Span::styled(clean(&url), theme.quiet()),
@@ -1077,6 +1133,9 @@ fn lane_lines(app: &App, lane: &LaneSummary, width: usize) -> Vec<Line<'static>>
             width,
             plain,
         ));
+    }
+    if let Some(power) = &lane.power {
+        lines.extend(field(theme, "idle", &idle_fact(power), width, plain));
     }
     let counts = tree::counts(lane);
     let services: Vec<&UnitSummary> = lane

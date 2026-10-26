@@ -225,6 +225,21 @@ pub(crate) fn unit_look(theme: &Theme, unit: &UnitSummary, spin: u64) -> Look {
     };
     let spinner = theme.spinner(spin);
     match (unit.state.as_str(), task) {
+        // An idle lane's units still serve; only the shape and word change.
+        ("ready", false) if unit.shown_state() == "frozen" => look(
+            theme.glyph(Glyph::Frozen),
+            Tone::Frozen,
+            "frozen",
+            Tone::Quiet,
+            None,
+        ),
+        ("ready", false) if unit.shown_state() == "throttled" => look(
+            theme.glyph(Glyph::Throttled),
+            Tone::Quiet,
+            "throttled",
+            Tone::Quiet,
+            None,
+        ),
         // A ready check passed (`●`), or the process merely runs (`◉`): the
         // shapes differ so 16 colors and color-blind eyes tell them apart.
         ("ready" | "running", false) => look(
@@ -390,8 +405,12 @@ pub(crate) fn lane_glyph(theme: &Theme, lane: &LaneSummary, spin: u64) -> (&'sta
         .reason
         .as_ref()
         .is_some_and(|reason| reason.code == "worktree_missing");
+    let power = lane.power.as_ref().map(|power| power.level.as_str());
     match lane.state.as_str() {
         _ if missing => (theme.glyph(Glyph::Attention), Tone::Attention),
+        "running" if power == Some("frozen") => (theme.glyph(Glyph::Frozen), Tone::Frozen),
+        // Dim, as on its units' rows; the `z` shape tells it from a stopped lane.
+        "running" if power == Some("throttled") => (theme.glyph(Glyph::Throttled), Tone::Quiet),
         "running" => (theme.glyph(Glyph::Ready), Tone::Ok),
         "starting" | "stopping" => (theme.spinner(spin), Tone::Busy),
         "failed" => (theme.glyph(Glyph::Failed), Tone::Failure),
@@ -406,7 +425,9 @@ fn severity(lane: &LaneSummary) -> u8 {
         Tone::Failure => 4,
         Tone::Attention => 3,
         Tone::Busy => 2,
-        Tone::Ok => 1,
+        Tone::Ok | Tone::Frozen => 1,
+        // A throttled lane is dim like a stopped one, yet it runs.
+        Tone::Quiet if lane.power.is_some() => 1,
         Tone::Quiet => 0,
     }
 }
@@ -1305,5 +1326,36 @@ mod tests {
             lane_label(&main, &[&main, &feat, &review]),
             ("main".into(), None)
         );
+    }
+
+    /// An idle unit keeps `state: ready`; its glyph comes from `power`, its
+    /// word stays dim, and a started-only unit reads the same once frozen.
+    #[test]
+    fn idle_units_take_the_power_glyph() {
+        let theme = Theme::default();
+        let unit = |power: Option<&str>, check: Option<&str>| UnitSummary {
+            name: "api".into(),
+            state: "ready".into(),
+            kind: "service".into(),
+            power: power.map(str::to_owned),
+            ready_check: check.map(str::to_owned),
+            ..UnitSummary::default()
+        };
+        let frozen = unit_look(&theme, &unit(Some("frozen"), Some("started")), 0);
+        assert_eq!(
+            (
+                frozen.glyph,
+                frozen.tone,
+                frozen.word.as_str(),
+                frozen.word_tone
+            ),
+            ("❄", Tone::Frozen, "frozen", Tone::Quiet)
+        );
+        let throttled = unit_look(&theme, &unit(Some("throttled"), None), 0);
+        assert_eq!(
+            (throttled.glyph, throttled.tone, throttled.word.as_str()),
+            ("z", Tone::Quiet, "throttled")
+        );
+        assert_eq!(unit_look(&theme, &unit(None, None), 0).glyph, "●");
     }
 }

@@ -34,7 +34,8 @@ pub struct UserConfig {
     /// Port range that every lane of every project takes its block of ports from, so
     /// lanes never collide. Defaults to `20000-32767`.
     pub ports: PortsConfig,
-    /// Where lane data folders (`lane.data_path`) live on this machine.
+    /// Where lane data folders (`lane.data_path`) live on this machine, and how long a
+    /// lane may sit without activity before devlanes throttles or freezes it.
     pub lanes: UserLanesConfig,
     /// Which certificate authority signs the proxy's HTTPS certificates (`ca`), and which
     /// stores `devlanes certs trust` installs it into (`trust`).
@@ -221,13 +222,14 @@ impl TuiGlyphs {
     }
 }
 
-/// Machine settings for lanes. Each lane gets its own data folder at
+/// Machine settings for lanes: where their data folders live, and when idle lanes are
+/// throttled or frozen. Each lane gets its own data folder at
 /// `<data_dir>/<project>/<lane id>`, available as `${{ lane.data_path }}` and
 /// `DEVLANES_LANE_DATA`. devlanes creates it when the lane is created and before each
 /// start, and `devlanes lane clean` deletes it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-#[schemars(extend("examples" = [{"data_dir":"~/.devlanes/data"}]))]
+#[schemars(extend("examples" = [{"data_dir":"~/.devlanes/data"},{"throttle_after":"5m","freeze_after":"15m"},{"throttle_after":"0s","freeze_after":"1h"}]))]
 pub struct UserLanesConfig {
     /// Folder that holds every lane's data folder, one subfolder per project; defaults to
     /// `data` in the devlanes home (`~/.devlanes/data`). Must be an absolute path or start
@@ -236,12 +238,66 @@ pub struct UserLanesConfig {
     /// to keep their data.
     #[schemars(extend("examples" = ["~/.devlanes/data","/Volumes/fast/devlanes"]))]
     pub data_dir: Option<String>,
+    /// After this long without activity, a lane's processes run at background priority:
+    /// lower CPU priority, and efficiency cores on machines that have them. They keep
+    /// serving requests. Activity is a request through the proxy, a new connection to one
+    /// of the lane's ports, the lane's services using CPU, or a devlanes command on the
+    /// lane; any of it restores normal priority and restarts the timer. macOS and Windows
+    /// only; Linux has no throttling, so lanes there stay at normal priority until
+    /// `freeze_after`. When both are set above `0s`, it must be shorter than
+    /// `freeze_after`. A running service with `services.<name>.keep_awake: true` keeps its
+    /// whole lane at normal priority. Defaults to `5m`; `0s` turns throttling off. The
+    /// daemon reads it when it starts.
+    #[schemars(extend("examples" = ["5m","0s"]))]
+    pub throttle_after: ConfigDuration,
+    /// After this long without activity, devlanes freezes a lane: it suspends every
+    /// process of the lane and pauses the lane's own containers. Shared infra is never
+    /// paused. Ports and process state are kept, so a frozen lane still counts as running.
+    /// Activity is a request through the proxy, a new connection to one of the lane's
+    /// ports, the lane's services using CPU, or a devlanes command on the lane; any of it
+    /// resumes a frozen lane and restarts the timer. A request through the proxy resumes
+    /// the lane at once and then goes through; a direct connection to a port is noticed
+    /// within about half a second. When both are set above `0s`, it must be longer than
+    /// `throttle_after` (`5m` unless set). A running service with
+    /// `services.<name>.keep_awake: true` keeps its whole lane awake. Defaults to `15m`;
+    /// `0s` turns freezing off. The daemon reads it when it starts.
+    #[schemars(extend("examples" = ["15m","1h","0s"]))]
+    pub freeze_after: ConfigDuration,
 }
 
 /// Folder under the devlanes home that holds lane data folders by default.
 pub const DEFAULT_DATA_DIR: &str = "data";
 
+/// Idle time before a lane is throttled when `lanes.throttle_after` is absent.
+pub const DEFAULT_THROTTLE_AFTER: Duration = Duration::from_secs(5 * 60);
+
+/// Idle time before a lane is frozen when `lanes.freeze_after` is absent.
+pub const DEFAULT_FREEZE_AFTER: Duration = Duration::from_secs(15 * 60);
+
+impl Default for UserLanesConfig {
+    /// Data folders under the devlanes home; idle lanes throttle at 5m and freeze at 15m.
+    fn default() -> Self {
+        Self {
+            data_dir: None,
+            throttle_after: ConfigDuration(DEFAULT_THROTTLE_AFTER),
+            freeze_after: ConfigDuration(DEFAULT_FREEZE_AFTER),
+        }
+    }
+}
+
 impl UserLanesConfig {
+    /// Idle time before a lane is throttled, or `None` when `throttle_after: 0s`
+    /// turns throttling off.
+    pub fn throttle_after(&self) -> Option<Duration> {
+        Some(self.throttle_after.0).filter(|after| !after.is_zero())
+    }
+
+    /// Idle time before a lane is frozen, or `None` when `freeze_after: 0s` turns
+    /// freezing off.
+    pub fn freeze_after(&self) -> Option<Duration> {
+        Some(self.freeze_after.0).filter(|after| !after.is_zero())
+    }
+
     /// The folder holding lane data folders: `data_dir` with `~/` expanded from `HOME`
     /// (on Windows also `~\`, from the profile directory), or `<home>/data`, where
     /// `home` is the devlanes home.
@@ -255,15 +311,43 @@ impl UserLanesConfig {
         }
     }
 
-    /// Rejects relative folders, which would depend on the daemon's working directory.
+    /// Rejects relative folders, which would depend on the daemon's working directory,
+    /// and a throttle that would start after the lane is already frozen.
     fn validate(&self) -> Result<(), ConfigError> {
         match self.data_dir.as_deref() {
-            None => Ok(()),
-            Some(dir) if below_home(dir).is_some() || Path::new(dir).is_absolute() => Ok(()),
-            Some(_) => Err(ConfigError::plain(
-                "lanes.data_dir: must be an absolute path or start with `~/`",
-            )),
+            None => {}
+            Some(dir) if below_home(dir).is_some() || Path::new(dir).is_absolute() => {}
+            Some(_) => {
+                return Err(ConfigError::plain(
+                    "lanes.data_dir: must be an absolute path or start with `~/`",
+                ));
+            }
         }
+        if let (Some(throttle), Some(freeze)) = (self.throttle_after(), self.freeze_after())
+            && throttle >= freeze
+        {
+            // The message's leading key is where the error is located and what a lenient
+            // load drops, so name the key the user most likely changed: a lone
+            // `freeze_after` below the default throttle time should not point at a
+            // `throttle_after` the file never set.
+            let (throttle_text, freeze_text) = (
+                crate::setting::short_duration_of(self.throttle_after),
+                crate::setting::short_duration_of(self.freeze_after),
+            );
+            let message = if throttle == DEFAULT_THROTTLE_AFTER {
+                format!(
+                    "lanes.freeze_after: {freeze_text} must be longer than lanes.throttle_after, \
+                     which is {throttle_text}; lower lanes.throttle_after or set it to 0s"
+                )
+            } else {
+                format!(
+                    "lanes.throttle_after: {throttle_text} must be shorter than \
+                     lanes.freeze_after, which is {freeze_text}"
+                )
+            };
+            return Err(ConfigError::plain(message));
+        }
+        Ok(())
     }
 }
 

@@ -28,9 +28,9 @@
 │   ● stub-stripe                           │   terminal.marks                        auto│         background (`COLORFGBG`); otherwise the terminal's 16  │                                           │
 │   ● stub-s3                               │   updates.check                         true│         colors.                                                │                                           │
 │   ◆ stub-twilio         orphaned · pid 482│   lanes.data_dir                     default│  dark   Always use the true-color palette made for a dark      │                                           │
-│   ● stub-sendgrid                         │   daemon.exit_when_idle                 true│         background.                                            │                                           │
-│   ● stub-segment                          │                                             │ ▌light  Always use the true-color palette made for a light     │                                           │
-│   ● stub-auth0                            │                                             │         background.                                            │                                           │
+│   ● stub-sendgrid                         │   lanes.throttle_after                    5m│         background.                                            │                                           │
+│   ● stub-segment                          │   lanes.freeze_after                     15m│ ▌light  Always use the true-color palette made for a light     │                                           │
+│   ● stub-auth0                            │   daemon.exit_when_idle                 true│         background.                                            │                                           │
 │   ● proxy-edge                            │                                             │  ansi   Use only the terminal's 16 named colors, so the TUI    │                                           │
 │   ● docs-search                           │                                             │         follows the terminal's color scheme.                   │                                           │
 │   ● ml-ranker                             │                                             │                                                                │                                           │
@@ -90,9 +90,9 @@
 27: 0 #8f8a7f, 4-5 #1d7a46, 6-16 darkgray, 44 #9a6b00, 46 #9a6b00, 86-89 dim, 90 #8f8a7f, 100-152 dim, 155 #9a6b00, 199 #8f8a7f
 28: 0 #8f8a7f, 4-5 #1d7a46, 6-12 darkgray, 44 #9a6b00, 46 #9a6b00, 86-89 dim, 90 #8f8a7f, 100-106 dim, 155 #9a6b00, 199 #8f8a7f
 29: 0 #8f8a7f, 4-5 #a35a00, 6-16 darkgray, 26-33 #a35a00, 34-43 dim, 44 #9a6b00, 46 #9a6b00, 83-89 dim, 90 #8f8a7f, 92 #9a6b00, 100-148 dim, 155 #9a6b00, 199 #8f8a7f
-30: 0 #8f8a7f, 4-5 #1d7a46, 6-18 darkgray, 44 #9a6b00, 46 #9a6b00, 86-89 dim, 90 #8f8a7f, 100-110 dim, 155 #9a6b00, 199 #8f8a7f
-31: 0 #8f8a7f, 4-5 #1d7a46, 6-17 darkgray, 44 #9a6b00, 90 #8f8a7f, 92 #9a6b00, 93-99 bold #9a6b00, 100-149 dim, 155 #9a6b00, 199 #8f8a7f
-32: 0 #8f8a7f, 4-5 #1d7a46, 6-15 darkgray, 44 #9a6b00, 90 #8f8a7f, 100-110 dim, 155 #9a6b00, 199 #8f8a7f
+30: 0 #8f8a7f, 4-5 #1d7a46, 6-18 darkgray, 44 #9a6b00, 46 #9a6b00, 88-89 dim, 90 #8f8a7f, 100-110 dim, 155 #9a6b00, 199 #8f8a7f
+31: 0 #8f8a7f, 4-5 #1d7a46, 6-17 darkgray, 44 #9a6b00, 46 #9a6b00, 87-89 dim, 90 #8f8a7f, 92 #9a6b00, 93-99 bold #9a6b00, 100-149 dim, 155 #9a6b00, 199 #8f8a7f
+32: 0 #8f8a7f, 4-5 #1d7a46, 6-15 darkgray, 44 #9a6b00, 46 #9a6b00, 86-89 dim, 90 #8f8a7f, 100-110 dim, 155 #9a6b00, 199 #8f8a7f
 33: 0 #8f8a7f, 4-5 #1d7a46, 6-15 cyan, 44 #9a6b00, 90 #8f8a7f, 92 #9a6b00, 100-150 dim, 155 #9a6b00, 199 #8f8a7f
 34: 0 #8f8a7f, 4-5 #1d7a46, 6-16 cyan, 44 #9a6b00, 90 #8f8a7f, 100-135 dim, 155 #9a6b00, 199 #8f8a7f
 35: 0 #8f8a7f, 4-5 #1d7a46, 6-14 green, 44 #9a6b00, 90 #8f8a7f, 155 #9a6b00, 199 #8f8a7f

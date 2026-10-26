@@ -221,6 +221,14 @@ pub fn terminate_verified(
     os::terminate_verified(identity, exit_code)
 }
 
+/// Resumes every thread of a suspended process (`NtResumeProcess`) only if the
+/// PID still belongs to the recorded process. A process that is not suspended
+/// is unaffected. For processes a crashed daemon left frozen.
+#[cfg(windows)]
+pub fn resume_verified(identity: &ProcessIdentity) -> Result<SignalOutcome, Error> {
+    os::resume_verified(identity)
+}
+
 /// Lists TCP listeners owned by `pids`, sorted and deduplicated.
 ///
 /// Diagnostics only (ready-check timeouts); never used to assign ports. On macOS this
@@ -233,6 +241,38 @@ pub fn listening_tcp(pids: &[u32]) -> Result<Vec<ListeningSocket>, Error> {
     sockets.sort_unstable();
     sockets.dedup();
     Ok(sockets)
+}
+
+/// One established TCP connection of any process on this machine, IPv4 or IPv6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TcpConnection {
+    pub local: SocketAddr,
+    pub remote: SocketAddr,
+}
+
+/// Lists every established TCP connection on the machine, both ends of loopback
+/// connections included, from the kernel's table: `/proc/net/tcp` and `tcp6` on
+/// Linux, the `net.inet.tcp.pcblist_n` sysctl on macOS, `GetExtendedTcpTable` on
+/// Windows. A connection the kernel accepted but the server has not taken with
+/// `accept` yet is listed too, so connections to a suspended server show up.
+///
+/// The idle loop polls this to see new connections to a lane's ports. Blocking.
+pub fn tcp_connections() -> Result<Vec<TcpConnection>, Error> {
+    let mut connections = os::tcp_connections()?;
+    connections.sort_unstable();
+    connections.dedup();
+    Ok(connections)
+}
+
+/// Puts the process in the macOS background band (`PRIO_DARWIN_BG`: lowest CPU
+/// priority, throttled disk and network I/O, efficiency cores on Apple Silicon)
+/// or takes it out, only if the PID still belongs to the recorded process.
+#[cfg(target_os = "macos")]
+pub fn set_background(
+    identity: &ProcessIdentity,
+    background: bool,
+) -> Result<SignalOutcome, Error> {
+    os::set_background(identity, background)
 }
 
 /// Session ID of `pid`, or `None` once it exited or the kernel refused to say.

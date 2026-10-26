@@ -28,7 +28,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_core::{
-    Error, ExitOutcome, LaunchSpec, OutputChunk, OutputStream, ProcessIdentity, StopPolicy,
+    Error, ExitOutcome, LaunchSpec, OutputChunk, OutputStream, Power, ProcessIdentity, StopPolicy,
     StopSignal, TerminalSize, Unit,
 };
 use devlanes_daemon::integrations::{
@@ -115,6 +115,10 @@ pub struct FakeRunner {
     pub stubborn_identity: Arc<Mutex<Option<ProcessIdentity>>>,
     /// Opened by [`FakeRunner::release`]; `hold` waits for it.
     pub gate: Gate,
+    /// `<pid> <Power>` for every power change of a unit, in order.
+    pub powers: Journal,
+    /// Units answer `Unsupported` to throttling, as on Linux.
+    pub no_throttle: Arc<AtomicBool>,
 }
 
 /// What `hold` waits on: a test opens it once it has seen what it waits for, so
@@ -188,6 +192,8 @@ impl UnitRunner for FakeRunner {
             resizes: self.resizes.clone(),
             leftovers: Mutex::default(),
             gate: self.gate.0.subscribe(),
+            powers: self.powers.clone(),
+            no_throttle: self.no_throttle.clone(),
         });
         let runner = unit.clone();
         tokio::spawn(async move { runner.run(script, spec.env).await });
@@ -213,6 +219,10 @@ pub struct FakeUnit {
     leftovers: Mutex<(Vec<LeftProcess>, Vec<LeftProcess>)>,
     /// The runner's [`Gate`], for `hold`.
     gate: watch::Receiver<bool>,
+    /// The runner's [`FakeRunner::powers`].
+    powers: Journal,
+    /// The runner's [`FakeRunner::no_throttle`].
+    no_throttle: Arc<AtomicBool>,
 }
 
 impl FakeUnit {
@@ -468,6 +478,20 @@ impl Unit for FakeUnit {
     fn renders_screen(&self) -> bool {
         self.renders
     }
+    /// Records `<pid> <level>` in the runner's power journal; throttling is
+    /// `Unsupported` while [`FakeRunner::no_throttle`] is set, as on Linux.
+    async fn set_power(&self, power: Power) -> Result<(), Error> {
+        if self.exit.borrow().is_some() {
+            return Err(Error::Exited);
+        }
+        if power == Power::Throttled && self.no_throttle.load(Ordering::SeqCst) {
+            return Err(Error::Unsupported("throttling".into()));
+        }
+        if let Ok(mut powers) = self.powers.0.lock() {
+            powers.push(format!("{} {power:?}", self.identity.pid));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -497,6 +521,8 @@ impl ManagedUnit for FakeUnit {
 pub struct FakeProcesses {
     pub alive: Arc<Mutex<BTreeSet<u32>>>,
     pub killed: Arc<Mutex<Vec<u32>>>,
+    /// PIDs resumed after a crash that may have left them frozen.
+    pub resumed: Arc<Mutex<Vec<u32>>>,
 }
 
 #[async_trait]
@@ -512,6 +538,12 @@ impl ProcessTable for FakeProcesses {
         }
         if let Ok(mut killed) = self.killed.lock() {
             killed.push(identity.pid);
+        }
+    }
+    /// Records the resume.
+    async fn resume(&self, identity: ProcessIdentity) {
+        if let Ok(mut resumed) = self.resumed.lock() {
+            resumed.push(identity.pid);
         }
     }
 }
@@ -733,6 +765,16 @@ impl InfraProvider for FakeInfra {
     }
     async fn adopt(&self, _: &[String]) -> Result<Value, InfraError> {
         Ok(Value::Null)
+    }
+    /// Records the pause; one container per lane.
+    async fn pause_lane(&self, _: &str, lane: u32) -> Result<usize, InfraError> {
+        self.record(format!("pause {lane}"));
+        Ok(1)
+    }
+    /// Records the unpause.
+    async fn unpause_lane(&self, _: &str, lane: u32) -> Result<usize, InfraError> {
+        self.record(format!("unpause {lane}"));
+        Ok(0)
     }
     async fn doctor(&self) -> Value {
         json!({"docker": {"reachable": true}})

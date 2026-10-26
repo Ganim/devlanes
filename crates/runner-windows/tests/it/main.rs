@@ -13,13 +13,14 @@ use std::{
 };
 
 use devlanes_core::{
-    Error, LaunchSpec, OutputChunk, OutputStream, ProcessIdentity, StopPolicy, StopSignal,
+    Error, LaunchSpec, OutputChunk, OutputStream, Power, ProcessIdentity, StopPolicy, StopSignal,
     TerminalSize, Unit,
 };
 use devlanes_runner_windows::{
     ConsoleHelper, ExitReport, HELPER_ARG, StderrMode, WindowsRunner, WindowsUnit,
     console_ctrl_main,
 };
+use devlanes_sys_windows::power::{PowerAccess, PowerHandle, PowerThrottling, PriorityClass};
 use tokio::sync::broadcast::{Receiver, error::RecvError};
 
 /// Upper bound for each test body.
@@ -1011,6 +1012,173 @@ async fn orphan_stops_ask_each_unit_once_then_terminate() {
 
         let helpers = std::fs::read_to_string(&log).expect("helper log");
         assert_eq!(helpers.lines().count(), 2, "{helpers}");
+    })
+    .await;
+}
+
+/// The numbers the `tick.cmd` processes last wrote to `paths`, 0 where none
+/// can be read yet.
+fn counts(paths: &[PathBuf]) -> Vec<u64> {
+    paths
+        .iter()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Polls `paths` until every count is above the one in `floor`.
+async fn counting_past(paths: &[PathBuf], floor: &[u64]) {
+    while !counts(paths).iter().zip(floor).all(|(now, low)| now > low) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// A frozen unit's leader and child, and the `ping` each runs, stop counting
+/// until the thaw; freezing twice still takes one thaw. Once the unit exited,
+/// power changes report it.
+#[tokio::test]
+async fn freezing_stops_every_member_until_thawed() {
+    bounded(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        script(
+            dir.path(),
+            "tick.cmd",
+            &[
+                "@echo off",
+                "set n=0",
+                ":loop",
+                "set /a n+=1 >NUL",
+                ">\"%~1\" echo %n%",
+                "ping -n 2 127.0.0.1 >NUL",
+                "goto loop",
+            ],
+        );
+        script(
+            dir.path(),
+            "tree.cmd",
+            &[
+                "@echo off",
+                "start \"\" /b cmd /d /c tick child.txt",
+                "call tick parent.txt",
+            ],
+        );
+        let unit = runner()
+            .spawn_unit(spec("tree", &[], dir.path(), env(&[dir.path()])))
+            .await
+            .expect("spawn");
+        let _cleanup = Cleanup(unit.clone());
+        let paths = [dir.path().join("parent.txt"), dir.path().join("child.txt")];
+        counting_past(&paths, &[1, 1]).await;
+        let members = unit.processes().await.expect("processes");
+        assert!(
+            members
+                .iter()
+                .filter(|p| p.name.eq_ignore_ascii_case("cmd.exe"))
+                .count()
+                >= 2,
+            "{members:?}"
+        );
+
+        unit.set_power(Power::Frozen).await.expect("freeze");
+        unit.set_power(Power::Frozen).await.expect("freeze again");
+        let frozen = counts(&paths);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(counts(&paths), frozen);
+
+        unit.set_power(Power::Normal).await.expect("thaw");
+        counting_past(&paths, &frozen).await;
+
+        unit.stop_with_report(policy(StopSignal::Kill, GRACE))
+            .await
+            .expect("stop");
+        assert!(matches!(
+            unit.set_power(Power::Frozen).await,
+            Err(Error::Exited)
+        ));
+    })
+    .await;
+}
+
+/// A Ctrl-C stop of a frozen unit resumes it first, so the fixture handles
+/// the event and exits without escalation.
+#[tokio::test]
+async fn ctrl_c_stops_a_frozen_unit() {
+    devlanes_sys_windows::console::set_ctrl_c_ignored(false).expect("accept Ctrl-C");
+    bounded(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let unit = runner()
+            .spawn_unit(fixture_spec(&["--port", "0"], dir.path()))
+            .await
+            .expect("spawn");
+        let _cleanup = Cleanup(unit.clone());
+        let mut output = unit.output();
+        read_until(&mut output, "LISTENING").await;
+        unit.set_power(Power::Frozen).await.expect("freeze");
+        let report = unit
+            .stop_with_report(policy(StopSignal::Interrupt, GRACE))
+            .await
+            .expect("stop");
+        assert_stopped(&report, StopSignal::Interrupt, false);
+        assert_eq!(report.outcome.code, Some(0), "{report:?}");
+    })
+    .await;
+}
+
+/// Throttling puts every member in efficiency mode (idle class and EcoQoS),
+/// also through a freeze, and `Normal` gives each its class and power
+/// throttling back.
+#[tokio::test]
+async fn throttling_is_efficiency_mode_until_normal() {
+    bounded(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (unit, tree) = fixture_tree(&runner(), &[], dir.path()).await;
+        let _cleanup = Cleanup(unit.clone());
+        let _kill = Kill(tree.clone());
+        let handles: Vec<PowerHandle> = tree
+            .iter()
+            .map(|p| {
+                PowerHandle::open(p.pid, p.start_time, PowerAccess::Throttle)
+                    .expect("open")
+                    .expect("member running")
+            })
+            .collect();
+        let classes = |handles: &[PowerHandle]| -> Vec<(PriorityClass, PowerThrottling)> {
+            handles
+                .iter()
+                .map(|h| {
+                    let class = h.priority_class().expect("priority class");
+                    (class, h.power_throttling().expect("power throttling"))
+                })
+                .collect()
+        };
+        let before = classes(&handles);
+        assert!(before.iter().all(|(_, t)| !t.eco_qos()), "{before:?}");
+
+        unit.set_power(Power::Throttled).await.expect("throttle");
+        let throttled = classes(&handles);
+        assert!(
+            throttled
+                .iter()
+                .all(|(class, t)| *class == PriorityClass::IDLE && t.eco_qos()),
+            "{throttled:?}"
+        );
+        unit.set_power(Power::Frozen).await.expect("freeze");
+        unit.set_power(Power::Throttled)
+            .await
+            .expect("throttle again");
+        assert_eq!(classes(&handles), throttled);
+
+        unit.set_power(Power::Normal).await.expect("normal");
+        assert_eq!(classes(&handles), before);
+        let report = unit
+            .stop_with_report(policy(StopSignal::Terminate, GRACE))
+            .await
+            .expect("stop");
+        assert_stopped(&report, StopSignal::Terminate, false);
     })
     .await;
 }

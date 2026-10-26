@@ -1,0 +1,82 @@
+ devlanes  1 acme   2 billing   3 shop                                                             M monitor   D daemon
+ lanes  1 main  2 feat/checkout  3 fix/cache  4 spike/old-search                                1-9 or [ ] switch lanes
+┌ @0 frozen · 37/38 up ────────────────────────┐┌ main @0 · frozen · 37 up ────────────────────────────────────────────┐
+│ ▾ services                                34 ││ branch    main                                                       │
+│   ❄ Gateway API                              ││ worktree  /work/acme                                                 │
+│   ❄ api-auth                                 ││ profile   web                                                        │
+│   ❄ api-users                                ││ domain    acme.localhost                                             │
+│   ❄ api-billing                              ││ ports     41000-41099                                                │
+│   ❄ api-orders                               ││ idle      frozen since 17:34 UTC, last activity a request at 17:19   │
+│   ❄ api-search                               ││           UTC                                                        │
+│   ❄ api-catalog                              ││ services  33 of 34 up                                                │
+│   ❄ api-inventory                            ││           · web-storybook    stopped                                 │
+│   ❄ api-notify                               ││ tasks     3 done, 4 not run                                          │
+│   ❄ api-reports                              ││ setup     4 of 4 done                                                │
+│   ❄ web-app                                  ││ infra     localstack :4566, postgres :5432 (shared), rabbitmq :5672, │
+│   ❄ web-admin                                ││           redis :6379 (shared)                                       │
+│   ❄ web-docs                                 ││                                                                      │
+│   · web-storybook                            ││ lanes in acme                                                        │
+│   ❄ web-landing                              ││ ▌ main @0                  frozen · 37 up                            │
+│   ❄ wrk-email                                ││   feat/checkout @1         throttled · 8 up                          │
+│   ❄ wrk-billing                              ││   fix/cache @2             not running · config changed              │
+│   ❄ wrk-index                                ││   spike/old-search @3      worktree missing                          │
+│   ❄ wrk-thumbs                               ││                                                                      │
+│   ❄ wrk-export                               ││ 1-9 (the lane's place in the bar), [ and ] or a click on a chip      │
+│   ❄ wrk-cron                                 ││ switch lanes. devlanes lane new <branch> adds one.                   │
+│   ❄ wrk-webhooks                             ││                                                                      │
+│   ❄ wrk-ledger                               ││                                                                      │
+│   ❄ stub-stripe                              ││                                                                      │
+│   ❄ stub-s3                                  ││                                                                      │
+│   ❄ stub-twilio                              ││                                                                      │
+│   ❄ stub-sendgrid                            ││                                                                      │
+│   ❄ stub-segment                             ││                                                                      │
+│   ❄ stub-auth0                               ││                                                                      │
+│   ❄ proxy-edge                               ││                                                                      │
+│   ❄ docs-search                              ││                                                                      │
+│   ❄ ml-ranker                                ││                                                                      │
+│   ❄ ml-embed                                 ││                                                                      │
+│   ❄ cache-warm                               ││                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+ x stop lane   r restart lane   p start with profiles   C clean lane   [ ] switch lane            ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
+1: 0-6 dim, 7-14 bold reversed, 16-30 dim, 33-43 dim, 46-47 dim, 48-63 yellow, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+2: 0 darkgray, 1-22 bold reversed, 23-48 darkgray, 50-53 bold, 57-73 dim, 75-119 darkgray
+3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-59 dim, 119 darkgray
+4: 0 darkgray, 4-16 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+5: 0 darkgray, 4-13 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+6: 0 darkgray, 4-14 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+7: 0 darkgray, 4-16 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+8: 0 darkgray, 4-15 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+9: 0 darkgray, 4-15 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+10: 0 darkgray, 4-16 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+11: 0 darkgray, 4-18 blue, 47-48 darkgray, 60-61 dim, 79-85 dim, 119 darkgray
+12: 0 darkgray, 4-15 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+13: 0 darkgray, 4-16 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+14: 0 darkgray, 4-5 blue, 6-12 green, 47-48 darkgray, 50-59 dim, 119 darkgray
+15: 0 darkgray, 4-5 blue, 6-14 green, 47-48 darkgray, 50-59 dim, 119 darkgray
+16: 0 darkgray, 4-5 blue, 6-13 green, 47-48 darkgray, 119 darkgray
+17: 0 darkgray, 4-5 dim, 6-18 dim green, 47-48 darkgray, 50-62 bold, 119 darkgray
+18: 0 darkgray, 4-5 blue, 6-16 green, 47-48 darkgray, 50-51 bold, 77-90 dim, 119 darkgray
+19: 0 darkgray, 4-5 blue, 6-14 magenta, 47-48 darkgray, 50-51 bold, 77-92 dim, 119 darkgray
+20: 0 darkgray, 4-5 blue, 6-16 magenta, 47-48 darkgray, 50-51 bold, 77-104 dim, 119 darkgray
+21: 0 darkgray, 4-5 blue, 6-14 magenta, 47-48 darkgray, 50-51 bold, 77-92 yellow, 119 darkgray
+22: 0 darkgray, 4-5 blue, 6-15 magenta, 47-48 darkgray, 119 darkgray
+23: 0 darkgray, 4-5 blue, 6-15 magenta, 47-48 darkgray, 50-112 dim, 119 darkgray
+24: 0 darkgray, 4-5 blue, 6-13 magenta, 47-48 darkgray, 50-99 dim, 119 darkgray
+25: 0 darkgray, 4-5 blue, 6-17 magenta, 47-48 darkgray, 119 darkgray
+26: 0 darkgray, 4-5 blue, 6-15 magenta, 47-48 darkgray, 119 darkgray
+27: 0 darkgray, 4-5 blue, 6-16 darkgray, 47-48 darkgray, 119 darkgray
+28: 0 darkgray, 4-5 blue, 6-12 darkgray, 47-48 darkgray, 119 darkgray
+29: 0 darkgray, 4-5 blue, 6-16 darkgray, 47-48 darkgray, 119 darkgray
+30: 0 darkgray, 4-5 blue, 6-18 darkgray, 47-48 darkgray, 119 darkgray
+31: 0 darkgray, 4-5 blue, 6-17 darkgray, 47-48 darkgray, 119 darkgray
+32: 0 darkgray, 4-5 blue, 6-15 darkgray, 47-48 darkgray, 119 darkgray
+33: 0 darkgray, 4-5 blue, 6-15 cyan, 47-48 darkgray, 119 darkgray
+34: 0 darkgray, 4-5 blue, 6-16 cyan, 47-48 darkgray, 119 darkgray
+35: 0 darkgray, 4-5 blue, 6-14 green, 47-48 darkgray, 119 darkgray
+36: 0 darkgray, 4-5 blue, 6-13 green, 47-48 darkgray, 119 darkgray
+37: 0 darkgray, 4-5 blue, 6-15 dim blue, 47-48 darkgray, 119 darkgray
+38: 0-119 darkgray
+39: 1 bold, 2-14 dim, 15 bold, 16-31 dim, 32 bold, 33-55 dim, 56 bold, 57-70 dim, 71-73 bold, 74-88 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

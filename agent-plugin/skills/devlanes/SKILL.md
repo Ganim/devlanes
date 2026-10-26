@@ -87,6 +87,7 @@ Failures come first, each with its last log lines and the command that shows mor
 | State | Meaning and next step |
 |---|---|
 | `ready` | Up and passing its ready check. Use it. |
+| `frozen`, `throttled` | A ready service in a lane that had no activity for a while (agent output shows `ready` with `power=frozen` or `power=throttled`, JSON `state: ready` with a `power` field). Any request, connection or devlanes command on the lane resumes it; no action needed. |
 | `starting`, `queued` | Starting, or waiting for a start slot. `devlanes wait UNIT --timeout 180s`. |
 | `running` | A task or exec in progress. Wait for it or read its logs. |
 | `failed` | Exited or never got ready. Read the printed tail, then `devlanes logs UNIT --tail 200` and `devlanes debug why UNIT`; fix the code or config and `devlanes restart UNIT`. A service that keeps failing its ready check usually has the wrong port or check: see references/configuration.md. |

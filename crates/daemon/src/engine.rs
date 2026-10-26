@@ -53,6 +53,9 @@ pub struct EngineOptions {
     /// nothing runs; `None` keeps the daemon up. Only for a daemon a client
     /// spawned: a service manager would not start it again.
     pub idle_exit: Option<Duration>,
+    /// Lane activity shared with the proxy, which records requests in it and
+    /// waits on it for frozen lanes to thaw.
+    pub idle: Arc<crate::idle::IdleBoard>,
 }
 
 impl EngineOptions {
@@ -70,6 +73,7 @@ impl EngineOptions {
             dns_listen: devlanes_resolver_dns::default_listen(),
             update_check: crate::update::UpdateCheckOptions::from_env(),
             idle_exit: None,
+            idle: Arc::default(),
         }
     }
 }
@@ -314,6 +318,8 @@ pub(crate) fn mutating(method: &Method) -> bool {
             | Method::Connect
             | Method::Disconnect
             | Method::HostsRetry
+            | Method::DebugFreeze
+            | Method::DebugThaw
     )
 }
 
@@ -447,6 +453,8 @@ impl Inner {
             Method::Env => self.env_method(params, &context).await,
             Method::Errors => self.errors_method(params, &context).await,
             Method::Why => self.why_method(params, &context).await,
+            Method::DebugFreeze => self.debug_freeze_method(&context).await,
+            Method::DebugThaw => self.debug_thaw_method(&context).await,
             Method::Url => self.url_method(params, &context).await,
             Method::Metrics => self.metrics_method(params, &context).await,
             Method::Subscribe => self.remote_subscribe(params, &session).await,

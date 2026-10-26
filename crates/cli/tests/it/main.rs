@@ -119,6 +119,9 @@ fn entire_command_inventory_builds_actions() {
         (&["env", "export", "api"], Some(Method::Env)),
         (&["env", "shell", "api"], Some(Method::Env)),
         (&["debug", "top", "--json"], Some(Method::Metrics)),
+        (&["debug", "freeze"], Some(Method::DebugFreeze)),
+        (&["debug", "freeze", "acme@2"], Some(Method::DebugFreeze)),
+        (&["debug", "thaw"], Some(Method::DebugThaw)),
         (&["lane", "resume"], Some(Method::Resume)),
         (&["lane", "ls"], Some(Method::LaneList)),
         (
@@ -238,6 +241,8 @@ fn positional_lanes_and_hosts_do_not_collide_with_global_flags() {
         (vec!["status", "acme@3"], "acme@3"),
         (vec!["--lane", "acme@1", "status", "acme@4"], "acme@4"),
         (vec!["lane", "clean", "acme@5", "--yes"], "acme@5"),
+        (vec!["debug", "freeze", "acme@6"], "acme@6"),
+        (vec!["--lane", "acme@7", "debug", "thaw"], "acme@7"),
     ] {
         let cli = Cli::try_parse_from(std::iter::once("devlanes").chain(args.clone()))
             .unwrap_or_else(|error| panic!("{args:?}: {error}"));

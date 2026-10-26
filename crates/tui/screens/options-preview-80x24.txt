@@ -14,9 +14,9 @@
 │ │   terminal.marks                   auto│ whatever this says.             │ │
 │ │   updates.check                    true│                                 │a│
 │ │   lanes.data_dir                default│  auto   Use the true-color dark │ │
-│ │   daemon.exit_when_idle            true│         or light palette when   │a│
-│ │                                        │         the terminal reports    │ │
-│ │                                        │         true color              │a│
+│ │   lanes.throttle_after               5m│         or light palette when   │a│
+│ │   lanes.freeze_after                15m│         the terminal reports    │ │
+│ │   daemon.exit_when_idle            true│         true color              │a│
 │ │                                        │         (`COLORTERM`) and its   │ │
 │ │ not saved yet   s saves to config.yaml                                   │a│
 │ └ ←→ change  enter done  esc undo  d default ───────────────────────[save] ┘ │
@@ -40,9 +40,9 @@
 13: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
 14: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
 15: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 36-42 dim, 43 #8f8a7f, 45 #9a6b00, 53-75 dim, 77 #9a6b00, 79 #8f8a7f
-16: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 53-73 dim, 77 #9a6b00, 79 #8f8a7f
-17: 0 #8f8a7f, 2 #9a6b00, 43 #8f8a7f, 53-72 dim, 77 #9a6b00, 79 #8f8a7f
-18: 0 #8f8a7f, 2 #9a6b00, 43 #8f8a7f, 53-62 dim, 77 #9a6b00, 79 #8f8a7f
+16: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 41-42 dim, 43 #8f8a7f, 53-73 dim, 77 #9a6b00, 79 #8f8a7f
+17: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 40-42 dim, 43 #8f8a7f, 53-72 dim, 77 #9a6b00, 79 #8f8a7f
+18: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 53-62 dim, 77 #9a6b00, 79 #8f8a7f
 19: 0 #8f8a7f, 2 #9a6b00, 43 #8f8a7f, 53-73 dim, 77 #9a6b00, 79 #8f8a7f
 20: 0 #8f8a7f, 2 #9a6b00, 4-19 #a35a00, 20 bold, 21-41 dim, 77 #9a6b00, 79 #8f8a7f
 21: 0 #8f8a7f, 1 on #f7e7b4, 2-3 #9a6b00, 4-5 bold #9a6b00, 6-12 dim #9a6b00, 13-14 #9a6b00, 15-19 bold #9a6b00, 20-24 dim #9a6b00, 25-26 #9a6b00, 27-29 bold #9a6b00, 30-34 dim #9a6b00, 35-36 #9a6b00, 37 bold #9a6b00, 38-45 dim #9a6b00, 46-69 #9a6b00, 70-75 bold #9a6b00, 76-77 #9a6b00, 79 #8f8a7f

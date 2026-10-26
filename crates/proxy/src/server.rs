@@ -1,6 +1,6 @@
 use std::{
     convert::Infallible,
-    io,
+    fmt, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, PoisonError},
     time::Duration,
@@ -36,6 +36,7 @@ use crate::{
     HostHeader, Route, RouteState, RouteTable, Upstream,
     activity::{ActiveBody, Activity},
     health::{Health, ListenerGuard, ListenerHealth},
+    lane::{ClientReads, LaneActivity},
     pool::{Connection, Pool},
 };
 
@@ -63,6 +64,8 @@ pub struct ProxyLimits {
     /// Refused connections to a ready service are retried for this long, which covers
     /// dev servers that a file watcher restarts.
     pub refused_retry: Duration,
+    /// A request to a frozen lane waits this long for the thaw, then is forwarded anyway.
+    pub thaw_wait: Duration,
 }
 
 impl Default for ProxyLimits {
@@ -75,12 +78,13 @@ impl Default for ProxyLimits {
             start_wait: Duration::from_secs(30),
             reconnect_wait: Duration::from_secs(15),
             refused_retry: Duration::from_secs(5),
+            thaw_wait: Duration::from_secs(10),
         }
     }
 }
 
 /// Peer policy and timeouts apply independently to every provided listener.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProxyConfig {
     pub lan: bool,
     /// Applies only to dialing; established SSE and WebSocket streams have no idle timeout.
@@ -89,6 +93,9 @@ pub struct ProxyConfig {
     pub https_redirect_port: Option<u16>,
     /// Adds `Via: 1.1 devlanes.run` to forwarded responses.
     pub via: bool,
+    /// Told about requests to ready routes with an owner and about client bytes on their
+    /// upgraded streams. Error pages, redirects and unknown hosts are not reported.
+    pub activity: Option<Arc<dyn LaneActivity>>,
 }
 
 impl Default for ProxyConfig {
@@ -99,7 +106,21 @@ impl Default for ProxyConfig {
             connect_timeout: Duration::from_secs(5),
             https_redirect_port: None,
             via: true,
+            activity: None,
         }
+    }
+}
+
+impl fmt::Debug for ProxyConfig {
+    /// Shows only whether an activity receiver is set, since it has no `Debug`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("lan", &self.lan)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("https_redirect_port", &self.https_redirect_port)
+            .field("via", &self.via)
+            .field("activity", &self.activity.is_some())
+            .finish()
     }
 }
 
@@ -471,6 +492,21 @@ impl Proxy {
             }
             return Ok(error_response(&page, format));
         }
+        // A mirrored route's owner names a lane on the remote box, which may
+        // share its reference with a local lane; the box sees its own traffic.
+        if let (Some(activity), Some(owner)) = (&self.config.activity, &route.owner)
+            && !route.remote
+            && let Some(thaw) = activity.request(owner)
+        {
+            tokio::select! {
+                _ = shutdown.cancelled() => {}
+                waited = tokio::time::timeout(self.limits.thaw_wait, thaw) => {
+                    if waited.is_err() {
+                        tracing::debug!(%owner, "thaw wait elapsed, forwarding anyway");
+                    }
+                }
+            }
+        }
         let upgrading = header_has_token(request.headers(), header::CONNECTION, "upgrade")
             && request.headers().contains_key(header::UPGRADE);
         let downstream_upgrade = upgrading.then(|| hyper::upgrade::on(&mut request));
@@ -593,13 +629,17 @@ impl Proxy {
                 ));
             };
             let upstream = hyper::upgrade::on(&mut response);
+            let lane = (!route.remote)
+                .then(|| self.config.activity.clone().zip(route.owner.clone()))
+                .flatten();
             tokio::spawn(async move {
                 let _permit = permit;
                 tokio::select! {
                     _ = shutdown.cancelled() => {},
                     _ = async {
                         if let (Ok(downstream), Ok(upstream)) = tokio::join!(downstream, upstream) {
-                            let _ = tokio::io::copy_bidirectional(&mut TokioIo::new(downstream), &mut TokioIo::new(upstream)).await;
+                            let mut client = ClientReads::new(TokioIo::new(downstream), lane);
+                            let _ = tokio::io::copy_bidirectional(&mut client, &mut TokioIo::new(upstream)).await;
                         }
                     } => {},
                 }

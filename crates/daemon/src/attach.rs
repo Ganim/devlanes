@@ -101,6 +101,12 @@ impl Inner {
             .lane_for_units(std::slice::from_ref(&args.unit), context)
             .await?;
         let name = selectors.into_iter().next().unwrap_or_default();
+        // Someone about to type needs a running unit. A read-only view (the TUI
+        // showing output) is not activity and leaves a frozen lane frozen.
+        if args.interactive {
+            self.wake_lane(&project, &lane, Some(crate::idle::Activity::Command))
+                .await;
+        }
         let (host, reference) = {
             let st = lane.st();
             // Its terminal belongs to a daemon that is gone; there is nothing to show.
@@ -200,16 +206,25 @@ impl Inner {
 
     /// Terminal input on a stream this session opened.
     pub(crate) async fn input(
-        &self,
+        self: &Arc<Self>,
         stream_id: u64,
         data: Bytes,
         session: &Session,
     ) -> Result<(), RpcError> {
-        let host = lock(&self.attach)
+        let (host, worktree) = lock(&self.attach)
             .streams
             .get(&(session.id(), stream_id))
-            .map(|stream| stream.host.clone())
+            .map(|stream| (stream.host.clone(), stream.key.0))
             .ok_or_else(|| RpcError::new("unknown_stream", json!({"stream_id": stream_id}), 1))?;
+        // Typing into a unit is using the lane; a frozen unit would not read it.
+        if let Some((project, lane)) = self
+            .all_lanes()
+            .into_iter()
+            .find(|(_, lane)| lane.worktree == worktree)
+        {
+            self.wake_lane(&project, &lane, Some(crate::idle::Activity::Command))
+                .await;
+        }
         // An exited unit drops input; the stream's empty frame already told the client.
         let _ = host.input(data).await;
         Ok(())

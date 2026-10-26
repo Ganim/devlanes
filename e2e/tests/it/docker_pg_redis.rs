@@ -266,3 +266,47 @@ fn docker_setup_entries_run_by_hand_stay_done() -> Result<()> {
     );
     Ok(())
 }
+
+/// `State.Paused` of each container.
+fn paused(lab: &Lab, ids: &[String]) -> Result<Vec<String>> {
+    ids.iter()
+        .map(|id| docker(lab, &["inspect", "-f", "{{.State.Paused}}", id]))
+        .collect()
+}
+
+/// Freezing a lane pauses its own Postgres and leaves the shared Redis running;
+/// thawing unpauses it and the data is reachable again.
+#[test]
+#[ignore = "needs docker"]
+fn docker_freeze_pauses_only_the_lanes_own_containers() -> Result<()> {
+    let lab = Lab::docker_projects(
+        "compose-pg-redis",
+        &[SHARED, LANE_ZERO],
+        Duration::from_secs(600),
+    )?;
+    start(&lab, lab.repo())?;
+    let own = containers(&lab, LANE_ZERO)?;
+    let shared = containers(&lab, SHARED)?;
+
+    lab.json(lab.repo(), &["debug", "freeze"])?;
+    assert_eq!(
+        paused(&lab, &own)?,
+        ["true"],
+        "the lane's Postgres is paused"
+    );
+    assert_eq!(
+        paused(&lab, &shared)?,
+        ["false"],
+        "shared Redis keeps running"
+    );
+
+    lab.json(lab.repo(), &["debug", "thaw"])?;
+    assert_eq!(paused(&lab, &own)?, ["false"]);
+    sql(&lab, LANE_ZERO, "INSERT INTO notes VALUES ('after-thaw')")?;
+    assert_eq!(
+        sql(&lab, LANE_ZERO, "SELECT body FROM notes")?,
+        "after-thaw"
+    );
+    lab.devlanes(lab.repo(), &["stop"])?.expect_code(0)?;
+    Ok(())
+}

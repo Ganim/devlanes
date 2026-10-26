@@ -1,0 +1,50 @@
+ devlanes  1 acme   2 billing   3 shop                     M monitor   D daemon
+ lanes  1 main  2 feat/checkout  3 fix/cache  +1 more   1-9 or [ ] switch lanes
+┌ @0 frozen · 37/38 up ────────┐┌ main @0 · frozen · 37 up ────────────────────┐
+│ ▾ services                34 ││ branch    main                               │
+│   ❄ Gateway API              ││ worktree  /work/acme                         │
+│   ❄ api-auth                 ││ profile   web                                │
+│   ❄ api-users                ││ domain    acme.localhost                     │
+│   ❄ api-billing              ││ ports     41000-41099                        │
+│   ❄ api-orders               ││ idle      frozen since 17:34 UTC, last       │
+│   ❄ api-search               ││           activity a request at 17:19 UTC    │
+│   ❄ api-catalog              ││ services  33 of 34 up                        │
+│   ❄ api-inventory            ││           · web-storybook    stopped         │
+│   ❄ api-notify               ││ tasks     3 done, 4 not run                  │
+│   ❄ api-reports              ││ setup     4 of 4 done                        │
+│   ❄ web-app                  ││ infra     localstack :4566, postgres :5432   │
+│   ❄ web-admin                ││           (shared), rabbitmq :5672, redis    │
+│   ❄ web-docs                 ││           :6379 (shared)                     │
+│   · web-storybook            ││                                              │
+│   ❄ web-landing              ││ lanes in acme                                │
+│   ❄ wrk-email                ││ ▌ main @0                  frozen · 37 up    │
+│   ❄ wrk-billing              ││   feat/checkout @1         throttled · 8 up  │
+│   ❄ wrk-index                ││ … z shows the rest                           │
+└──────────────────────────────┘└──────────────────────────────────────────────┘
+ x stop lane   r restart lane   p start with profiles     ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
+1: 0-6 dim, 7-14 bold reversed, 16-30 dim, 33-43 dim, 45-52 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
+2: 0 darkgray, 1-22 bold reversed, 23-32 darkgray, 34-37 bold, 41-57 dim, 59-79 darkgray
+3: 0 darkgray, 2-3 dim, 28-29 dim, 31-32 darkgray, 34-43 dim, 79 darkgray
+4: 0 darkgray, 4-16 blue, 31-32 darkgray, 34-43 dim, 79 darkgray
+5: 0 darkgray, 4-13 blue, 31-32 darkgray, 34-43 dim, 79 darkgray
+6: 0 darkgray, 4-14 blue, 31-32 darkgray, 34-43 dim, 79 darkgray
+7: 0 darkgray, 4-16 blue, 31-32 darkgray, 34-43 dim, 79 darkgray
+8: 0 darkgray, 4-15 blue, 31-32 darkgray, 34-43 dim, 79 darkgray
+9: 0 darkgray, 4-15 blue, 31-32 darkgray, 34-43 dim, 79 darkgray
+10: 0 darkgray, 4-16 blue, 31-32 darkgray, 34-43 dim, 79 darkgray
+11: 0 darkgray, 4-18 blue, 31-32 darkgray, 44-45 dim, 63-69 dim, 79 darkgray
+12: 0 darkgray, 4-15 blue, 31-32 darkgray, 34-43 dim, 79 darkgray
+13: 0 darkgray, 4-16 blue, 31-32 darkgray, 34-43 dim, 79 darkgray
+14: 0 darkgray, 4-5 blue, 6-12 green, 31-32 darkgray, 34-43 dim, 79 darkgray
+15: 0 darkgray, 4-5 blue, 6-14 green, 31-32 darkgray, 34-43 dim, 79 darkgray
+16: 0 darkgray, 4-5 blue, 6-13 green, 31-32 darkgray, 34-43 dim, 79 darkgray
+17: 0 darkgray, 4-5 dim, 6-18 dim green, 31-32 darkgray, 79 darkgray
+18: 0 darkgray, 4-5 blue, 6-16 green, 31-32 darkgray, 34-46 bold, 79 darkgray
+19: 0 darkgray, 4-5 blue, 6-14 magenta, 31-32 darkgray, 34-35 bold, 61-74 dim, 79 darkgray
+20: 0 darkgray, 4-5 blue, 6-16 magenta, 31-32 darkgray, 34-35 bold, 61-76 dim, 79 darkgray
+21: 0 darkgray, 4-5 blue, 6-14 magenta, 31-32 darkgray, 34-51 dim, 79 darkgray
+22: 0-79 darkgray
+23: 1 bold, 2-14 dim, 15 bold, 16-31 dim, 32 bold, 33-55 dim, 58 bold, 59-70 dim, 71 bold, 72-79 dim

@@ -93,6 +93,9 @@ async fn engine_with(
     options.watch = false;
     options.start_timeout = Duration::from_secs(10);
     options.user.ports.range = ports.into();
+    options.idle =
+        Arc::new(devlanes_daemon::idle::IdleBoard::default().without_connection_checks());
+    let idle = options.idle.clone();
     let engine = Engine::new(options, store, integ, CancellationToken::new());
     engine.reconcile().await.expect("reconcile");
     Harness {
@@ -101,6 +104,7 @@ async fn engine_with(
         infra: FakeInfra::default(),
         processes,
         home: home.to_path_buf(),
+        idle,
         next_id: AtomicU64::new(1),
     }
 }

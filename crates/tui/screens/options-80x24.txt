@@ -14,9 +14,9 @@
 │ │   terminal.marks                   auto│ whatever this says.             │ │
 │ │   updates.check                    true│                                 │a│
 │ │   lanes.data_dir                default│  auto   Use the true-color dark │ │
-│ │   daemon.exit_when_idle            true│         or light palette when   │a│
-│ │                                        │         the terminal reports    │ │
-│ │                                        │         true color              │a│
+│ │   lanes.throttle_after               5m│         or light palette when   │a│
+│ │   lanes.freeze_after                15m│         the terminal reports    │ │
+│ │   daemon.exit_when_idle            true│         true color              │a│
 │ │                                        │         (`COLORTERM`) and its   │ │
 │ │                                                                          │a│
 │ └ ↑↓ select  ←→ section  enter edit  d default  s save ─────────────[save] ┘ │
@@ -40,9 +40,9 @@
 13: 0 darkgray, 2 bold, 4 bold, 39-42 dim, 43 darkgray, 77 bold, 79 darkgray
 14: 0 darkgray, 2 bold, 4 bold, 39-42 dim, 43 darkgray, 77 bold, 79 darkgray
 15: 0 darkgray, 2 bold, 4 bold, 36-42 dim, 43 darkgray, 45 bold, 53-75 dim, 77 bold, 79 darkgray
-16: 0 darkgray, 2 bold, 4 bold, 39-42 dim, 43 darkgray, 53-73 dim, 77 bold, 79 darkgray
-17: 0 darkgray, 2 bold, 43 darkgray, 53-72 dim, 77 bold, 79 darkgray
-18: 0 darkgray, 2 bold, 43 darkgray, 53-62 dim, 77 bold, 79 darkgray
+16: 0 darkgray, 2 bold, 4 bold, 41-42 dim, 43 darkgray, 53-73 dim, 77 bold, 79 darkgray
+17: 0 darkgray, 2 bold, 4 bold, 40-42 dim, 43 darkgray, 53-72 dim, 77 bold, 79 darkgray
+18: 0 darkgray, 2 bold, 4 bold, 39-42 dim, 43 darkgray, 53-62 dim, 77 bold, 79 darkgray
 19: 0 darkgray, 2 bold, 43 darkgray, 53-73 dim, 77 bold, 79 darkgray
 20: 0 darkgray, 2 bold, 77 bold, 79 darkgray
 21: 0 darkgray, 1 reversed, 2-5 bold, 6-12 bold dim, 13-16 bold, 17-24 bold dim, 25-31 bold, 32-36 bold dim, 37-39 bold, 40-47 bold dim, 48-50 bold, 51-55 bold dim, 56-69 bold, 70-75 bold dim, 76-77 bold, 79 darkgray

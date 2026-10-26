@@ -4,7 +4,7 @@
 use std::{
     fmt, io,
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex, MutexGuard, PoisonError, TryLockError,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -13,13 +13,14 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_core::{
-    Error, ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopPolicy, StopSignal,
+    Error, ExitOutcome, LaunchSpec, OutputChunk, Power, ProcessIdentity, StopPolicy, StopSignal,
     TerminalSize, Unit, WindowsStop,
 };
 use devlanes_sys::{ListeningSocket, ProcessInfo};
 use devlanes_sys_windows::{
     console::CtrlEvent,
     job::Job,
+    power::{PowerAccess, PowerHandle, PowerThrottling, PriorityClass},
     proc::{Held, ProcessEntry},
     spawn::Child,
     window::close_windows,
@@ -49,6 +50,9 @@ const TERMINATE_BATCH: &[u8] = b"Y\r";
 const SWEEP_POLL: Duration = Duration::from_millis(25);
 /// Exit code of processes the runner ends by terminating the job.
 const TERMINATED: u32 = 1;
+/// Most reads of the job a freeze makes. A member can start a process between
+/// two reads, so the freeze reads again until a read finds nothing new.
+const FREEZE_PASSES: usize = 5;
 
 /// Everything known about a finished unit. Shared by all waiters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +113,10 @@ struct Inner {
     /// a terminated process leaves the job's list and count a moment before
     /// it has fully exited, and only its handle tells when it has.
     held: Mutex<Vec<(ProcessInfo, Held)>>,
+    /// The unit's power level and the handles that hold it.
+    power: Mutex<PowerState>,
+    /// A stop began; from then on the unit stays at `Power::Normal`.
+    stopping: AtomicBool,
     leader_exited: AtomicBool,
     /// Set when the supervisor ended without publishing a real report.
     crashed: AtomicBool,
@@ -154,6 +162,161 @@ struct Stopping {
 struct Sweep {
     swept: Vec<ProcessInfo>,
     escaped: Vec<ProcessInfo>,
+}
+
+/// What the unit did to its members' scheduling, through handles it keeps
+/// open so each change is undone once, on the same process.
+#[derive(Debug, Default)]
+struct PowerState {
+    /// Members this unit suspended, held until the thaw.
+    frozen: Vec<PowerHandle>,
+    /// Members this unit put in efficiency mode.
+    throttled: Vec<Throttled>,
+    /// The unit is at `Power::Frozen`.
+    is_frozen: bool,
+    /// Efficiency mode is on, also under a freeze.
+    is_throttled: bool,
+}
+
+/// A member in efficiency mode.
+#[derive(Debug)]
+struct Throttled {
+    handle: PowerHandle,
+    /// Its class and power throttling before; `None` for a member that
+    /// started while the unit was throttled, which inherited the idle class
+    /// from its parent and gets `NORMAL_PRIORITY_CLASS` with Windows deciding
+    /// its throttling.
+    before: Option<(PriorityClass, PowerThrottling)>,
+}
+
+impl PowerState {
+    /// Whether the unit holds nothing: no suspension, no efficiency mode and
+    /// no handle left from a failed undo.
+    fn is_normal(&self) -> bool {
+        !self.is_frozen && !self.is_throttled && self.frozen.is_empty() && self.throttled.is_empty()
+    }
+
+    /// Whether `process` is behind one of `handles`.
+    fn has<'a>(mut handles: impl Iterator<Item = &'a PowerHandle>, process: &ProcessInfo) -> bool {
+        handles.any(|h| h.pid() == process.pid && h.start_time() == process.start_time)
+    }
+
+    /// Suspends the members of `live` this unit has not suspended yet and
+    /// returns how many it suspended. Blocking.
+    fn suspend_new(&mut self, live: &[ProcessInfo]) -> io::Result<usize> {
+        let mut added = 0;
+        for process in live {
+            if Self::has(self.frozen.iter(), process) {
+                continue;
+            }
+            let Some(mut handle) =
+                PowerHandle::open(process.pid, process.start_time, PowerAccess::Suspend)?
+            else {
+                continue;
+            };
+            handle.suspend()?;
+            self.frozen.push(handle);
+            added += 1;
+        }
+        Ok(added)
+    }
+
+    /// Resumes every member this unit suspended, each through the handle that
+    /// suspended it. Every handle is tried. Handles that fail stay, with the
+    /// unit still frozen if it was, so the next `Power::Normal` tries them
+    /// again; the first error is returned. Blocking.
+    fn resume(&mut self) -> io::Result<()> {
+        let mut first = None;
+        self.frozen.retain_mut(|handle| match handle.resume() {
+            Ok(()) => false,
+            Err(error) => {
+                first.get_or_insert(error);
+                true
+            }
+        });
+        match first {
+            None => {
+                self.is_frozen = false;
+                Ok(())
+            }
+            Some(error) => Err(error),
+        }
+    }
+
+    /// Puts the members of `live` this unit has not throttled yet in
+    /// efficiency mode: the idle priority class and EcoQoS on top of the
+    /// throttling they chose. With `record`, each member's class and
+    /// throttling are kept to restore. Blocking.
+    fn throttle_new(&mut self, live: &[ProcessInfo], record: bool) -> io::Result<()> {
+        for process in live {
+            if Self::has(self.throttled.iter().map(|t| &t.handle), process) {
+                continue;
+            }
+            let Some(handle) =
+                PowerHandle::open(process.pid, process.start_time, PowerAccess::Throttle)?
+            else {
+                continue;
+            };
+            let throttling = handle.power_throttling()?;
+            let before = if record {
+                Some((handle.priority_class()?, throttling))
+            } else {
+                None
+            };
+            // Kept before the change, so a failure halfway is still undone.
+            self.throttled.push(Throttled { handle, before });
+            let handle = &self.throttled[self.throttled.len() - 1].handle;
+            handle.set_priority_class(PriorityClass::IDLE)?;
+            handle.set_power_throttling(throttling.with_eco_qos())?;
+        }
+        Ok(())
+    }
+
+    /// Takes every throttled member out of efficiency mode, back to the class
+    /// and throttling it had. Every member is tried. Members that fail stay,
+    /// with the unit still throttled if it was, so the next `Power::Normal`
+    /// tries them again; the first error is returned. Blocking.
+    fn unthrottle(&mut self) -> io::Result<()> {
+        let mut first = None;
+        self.throttled.retain(|Throttled { handle, before }| {
+            if handle.exited() {
+                return false;
+            }
+            let (class, throttling) =
+                before.unwrap_or((PriorityClass::NORMAL, PowerThrottling::DEFAULT));
+            let restored = handle
+                .set_priority_class(class)
+                .and_then(|()| handle.set_power_throttling(throttling));
+            match restored {
+                Ok(()) => false,
+                Err(error) => {
+                    first.get_or_insert(error);
+                    true
+                }
+            }
+        });
+        match first {
+            None => {
+                self.is_throttled = false;
+                Ok(())
+            }
+            Some(error) => Err(error),
+        }
+    }
+
+    /// Back to `Power::Normal`: resumed and out of efficiency mode. Blocking.
+    fn normal(&mut self) -> io::Result<()> {
+        let resumed = self.resume();
+        let unthrottled = self.unthrottle();
+        resumed.and(unthrottled)
+    }
+
+    /// Closes the handles of members that exited, so their PIDs are not
+    /// pinned for as long as the unit stays throttled.
+    fn prune(&mut self) {
+        self.frozen.retain(|handle| !handle.exited());
+        self.throttled.retain(|t| !t.handle.exited());
+    }
 }
 
 /// Launches the leader, starts its output readers and waiter, then its supervisor.
@@ -214,6 +377,8 @@ pub(crate) async fn spawn(
         answered: AtomicBool::new(false),
         members: Mutex::new(Vec::new()),
         held: Mutex::new(Vec::new()),
+        power: Mutex::new(PowerState::default()),
+        stopping: AtomicBool::new(false),
         leader_exited: AtomicBool::new(false),
         crashed: AtomicBool::new(false),
         stops,
@@ -258,7 +423,7 @@ async fn supervise(
         tokio::select! {
             result = &mut exited => break exit_code(result),
             _ = tick.tick() => {
-                inner.live_members().await;
+                inner.track().await;
             }
             Some(request) = requests.recv() => {
                 let deadline = Instant::now() + request.timeout;
@@ -430,13 +595,162 @@ impl Inner {
         }
     }
 
+    /// The supervisor's periodic refresh: reads the members and gives those
+    /// that started since the last one the unit's power level.
+    async fn track(self: &Arc<Self>) {
+        let inner = Arc::clone(self);
+        let tracked = blocking(move || {
+            let live = inner.refresh_blocking()?;
+            inner.track_power_blocking(&live);
+            Ok::<_, Error>(())
+        })
+        .await;
+        if let Ok(Err(error)) | Err(error) = tracked {
+            tracing::warn!(%error, pid = self.identity.pid, "reading the unit's job failed");
+        }
+    }
+
+    /// Suspends or throttles members of `live` the unit has not reached yet,
+    /// while it is frozen or throttled. A member that started while the unit
+    /// was throttled gets `NORMAL_PRIORITY_CLASS` back later. Best effort: a
+    /// member that refuses is tried again at the next refresh. Blocking.
+    fn track_power_blocking(&self, live: &[ProcessInfo]) {
+        let mut state = lock(&self.power);
+        state.prune();
+        let result = if state.is_frozen {
+            state.suspend_new(live).map(drop)
+        } else if state.is_throttled {
+            state.throttle_new(live, false)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            tracing::debug!(%error, pid = self.identity.pid, "a new member kept its power level");
+        }
+    }
+
+    /// Moves the unit to `power`; see [`WindowsUnit::set_power`]. Blocking.
+    fn set_power_blocking(&self, power: Power) -> Result<(), Error> {
+        let mut state = lock(&self.power);
+        // Checked under the lock: a stop that begins after this point resets
+        // whatever this call sets.
+        if self.leader_exited.load(Ordering::Acquire) || self.exit.borrow().is_some() {
+            return Err(Error::Exited);
+        }
+        if self.stopping.load(Ordering::Acquire) {
+            return match power {
+                Power::Normal => Ok(()),
+                Power::Throttled | Power::Frozen => Err(Error::Exited),
+            };
+        }
+        match power {
+            Power::Normal => Ok(state.normal()?),
+            Power::Frozen => self.freeze(&mut state),
+            Power::Throttled => self.throttle(&mut state),
+        }
+    }
+
+    /// Suspends every member, reading the job again until a read finds no
+    /// member left to suspend or [`FREEZE_PASSES`] reads were made; the
+    /// refresh catches anything started after that. Efficiency mode stays as
+    /// it was. On failure every member this unit suspended is resumed, as far
+    /// as [`PowerState::resume`] gets. Blocking.
+    fn freeze(&self, state: &mut PowerState) -> Result<(), Error> {
+        let mut passes = || -> Result<(), Error> {
+            for _ in 0..FREEZE_PASSES {
+                if state.suspend_new(&self.refresh_blocking()?)? == 0 {
+                    break;
+                }
+            }
+            Ok(())
+        };
+        match passes() {
+            Ok(()) => {
+                state.is_frozen = true;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = state.resume();
+                Err(error)
+            }
+        }
+    }
+
+    /// Resumes a frozen unit, then puts every member in efficiency mode. The
+    /// first call after `Power::Normal` records each member's priority class
+    /// to restore. When a member refuses, every member is taken out of
+    /// efficiency mode again. Blocking.
+    fn throttle(&self, state: &mut PowerState) -> Result<(), Error> {
+        state.resume()?;
+        let record = !state.is_throttled;
+        let result = self
+            .refresh_blocking()
+            .and_then(|live| Ok(state.throttle_new(&live, record)?));
+        match result {
+            Ok(()) => {
+                state.is_throttled = true;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = state.unthrottle();
+                Err(error)
+            }
+        }
+    }
+
+    /// Puts the unit back at `Power::Normal` for a stop, logging what fails.
+    /// Blocking.
+    fn normal_for_stop(&self) {
+        if let Err(error) = lock(&self.power).normal() {
+            tracing::warn!(%error, pid = self.identity.pid, "restoring the unit's power level failed");
+        }
+    }
+
     /// Starts a stop: terminates the job for SIGKILL, otherwise asks politely
     /// in the background so the supervisor keeps watching the deadline.
     /// A pseudo console gets Ctrl-C as the key, which also reaches programs
     /// that read the console raw, as a terminal's interrupt character would.
+    /// A frozen or throttled unit is put back at `Power::Normal` first.
     fn begin_stop(self: &Arc<Self>, signal: StopSignal, deadline: Instant) {
-        let event = match signal.windows_stop(self.through_shell) {
-            WindowsStop::Terminate => return self.terminate_job(),
+        self.stopping.store(true, Ordering::Release);
+        let stop = signal.windows_stop(self.through_shell);
+        if stop == WindowsStop::Terminate {
+            self.terminate_job();
+        }
+        let deadline = deadline.into_std();
+        if self.holds_no_power() {
+            return self.ask_to_stop(stop, deadline);
+        }
+        let inner = Arc::clone(self);
+        tokio::spawn(async move {
+            // Suspended threads handle no console event, key or window
+            // message, so the unit runs again before it is asked to stop.
+            // Terminating the job works on suspended processes, so SIGKILL
+            // did not wait for this.
+            let waking = Arc::clone(&inner);
+            let _ = blocking(move || waking.normal_for_stop()).await;
+            inner.ask_to_stop(stop, deadline);
+        });
+    }
+
+    /// Whether the unit holds no suspension or efficiency mode, without
+    /// waiting: a power change in progress counts as holding one. The stop
+    /// flag is set before this is read, so a change that starts later is
+    /// refused.
+    fn holds_no_power(&self) -> bool {
+        match self.power.try_lock() {
+            Ok(state) => state.is_normal(),
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().is_normal(),
+            Err(TryLockError::WouldBlock) => false,
+        }
+    }
+
+    /// Sends the graceful part of a stop: Ctrl-C as a key to a pseudo
+    /// console, or a console event and `WM_CLOSE` through a blocking task.
+    /// Nothing for `WindowsStop::Terminate`.
+    fn ask_to_stop(self: &Arc<Self>, stop: WindowsStop, deadline: std::time::Instant) {
+        let event = match stop {
+            WindowsStop::Terminate => return,
             WindowsStop::CtrlC if self.pty => {
                 self.write_input(Bytes::from_static(CTRL_C), true);
                 None
@@ -445,7 +759,6 @@ impl Inner {
             WindowsStop::CtrlBreak => Some(CtrlEvent::CtrlBreak),
         };
         let inner = Arc::clone(self);
-        let deadline = deadline.into_std();
         task::spawn_blocking(move || inner.ask_to_close(event, deadline));
     }
 
@@ -582,6 +895,9 @@ impl Inner {
         }
         let held = std::mem::take(&mut *lock(&self.held));
         self.terminate_job();
+        // Left over when the leader exited on its own while the unit was
+        // throttled; from here on the handles would only pin PIDs.
+        drop(std::mem::take(&mut *lock(&self.power)));
         let deadline = std::time::Instant::now() + self.timing.sweep_timeout;
         let remaining = || deadline.saturating_duration_since(std::time::Instant::now());
         let mut sweep = Sweep::default();
@@ -651,6 +967,36 @@ impl WindowsUnit {
             return Err(Error::Exited);
         }
         Ok(*lock(&self.inner.size))
+    }
+
+    /// Moves the unit's processes, the job's members other than the console
+    /// host, to `power`.
+    ///
+    /// `Frozen` suspends every member (`NtSuspendProcess`), reading the job
+    /// again until no new member shows up, at most 5 times, and keeps each
+    /// process's handle open, so the thaw resumes exactly the processes it
+    /// suspended and a reused PID is never touched. `Throttled` is efficiency
+    /// mode: each member's priority class and power throttling are recorded,
+    /// then it gets `IDLE_PRIORITY_CLASS` and EcoQoS; members that start
+    /// later get the same at the supervisor's next membership refresh.
+    /// `Normal` resumes and restores the recorded class and throttling
+    /// (`NORMAL_PRIORITY_CLASS` and Windows' default throttling for members
+    /// that started while throttled). Moving from `Frozen` to `Throttled`
+    /// resumes first. Memory is never trimmed.
+    ///
+    /// A member that refuses fails the call: a failed freeze resumes what it
+    /// suspended, and a failed throttle takes every member out of efficiency
+    /// mode. When `Normal` cannot resume or restore a member, it returns the
+    /// error and keeps that member's handle and the unit's level, so the next
+    /// `Normal` tries again. A stop puts the unit back at `Normal` before it
+    /// asks the unit to close, and from then on only `Normal` is accepted.
+    /// `Exited` once the leader exited.
+    pub async fn set_power(&self, power: Power) -> Result<(), Error> {
+        if self.inner.exit.borrow().is_some() {
+            return Err(Error::Exited);
+        }
+        let inner = Arc::clone(&self.inner);
+        blocking(move || inner.set_power_blocking(power)).await?
     }
 
     /// Ends every process of the unit at once by terminating its job, without
@@ -817,6 +1163,11 @@ impl Unit for WindowsUnit {
     /// See [`WindowsUnit::stop_with_report`].
     async fn stop(&self, policy: StopPolicy) -> Result<(), Error> {
         self.stop_with_report(policy).await.map(|_| ())
+    }
+
+    /// See [`WindowsUnit::set_power`].
+    async fn set_power(&self, power: Power) -> Result<(), Error> {
+        WindowsUnit::set_power(self, power).await
     }
 
     /// See [`WindowsUnit::wait_report`].

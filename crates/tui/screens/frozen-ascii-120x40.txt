@@ -1,0 +1,82 @@
+ devlanes  1 acme   2 billing   3 shop                                                             M monitor   D daemon
+ lanes  1 main  2 feat/checkout  3 fix/cache  4 spike/old-search                                1-9 or [ ] switch lanes
++ @0 frozen · 37/38 up ------------------------++ Gateway API  api-gateway · ~ frozen --------- watching · enter types +
+| v services                                34 || > @acme/api-gateway@2.4.0 dev                                        |
+|   ~ Gateway API                              || > tsx watch src/server.ts                                            |
+|   ~ api-auth                                 ||                                                                      |
+|   ~ api-users                                || ✓ connected to postgres (acme_lane0)                                 |
+|   ~ api-billing                              || ✓ connected to redis                                                 |
+|   ~ api-orders                               || listening on :41000                                                  |
+|   ~ api-search                               || 10:42:00 GET /v1/orders/1000 200 3ms                                 |
+|   ~ api-catalog                              || 10:42:11 GET /v1/orders/1017 200 4ms                                 |
+|   ~ api-inventory                            || 10:42:22 GET /v1/orders/1034 200 5ms                                 |
+|   ~ api-notify                               || 10:42:33 GET /v1/orders/1051 200 6ms                                 |
+|   ~ api-reports                              || 10:42:44 GET /v1/orders/1068 404 7ms                                 |
+|   ~ web-app                                  || 10:42:55 GET /v1/orders/1085 200 3ms                                 |
+|   ~ web-admin                                || 10:42:06 GET /v1/orders/1102 200 4ms                                 |
+|   ~ web-docs                                 || 10:42:17 GET /v1/orders/1119 200 5ms                                 |
+|   - web-storybook                            || 10:42:28 GET /v1/orders/1136 200 6ms                                 |
+|   ~ web-landing                              || 10:42:39 GET /v1/orders/1153 200 7ms                                 |
+|   ~ wrk-email                                || 10:43:50 GET /v1/orders/1170 200 3ms                                 |
+|   ~ wrk-billing                              || 10:43:01 GET /v1/orders/1187 200 4ms                                 |
+|   ~ wrk-index                                || 10:43:12 GET /v1/orders/1204 200 5ms                                 |
+|   ~ wrk-thumbs                               || 10:43:23 GET /v1/orders/1221 404 6ms                                 |
+|   ~ wrk-export                               || 10:43:34 GET /v1/orders/1238 200 7ms                                 |
+|   ~ wrk-cron                                 || 10:43:45 GET /v1/orders/1255 200 3ms                                 |
+|   ~ wrk-webhooks                             || 10:43:56 GET /v1/orders/1272 200 4ms                                 |
+|   ~ wrk-ledger                               || 10:43:07 GET /v1/orders/1289 200 5ms                                 |
+|   ~ stub-stripe                              ||                                                                      |
+|   ~ stub-s3                                  ||                                                                      |
+|   ~ stub-twilio                              ||                                                                      |
+|   ~ stub-sendgrid                            ||                                                                      |
+|   ~ stub-segment                             ||                                                                      |
+|   ~ stub-auth0                               ||                                                                      |
+|   ~ proxy-edge                               ||                                                                      |
+|   ~ docs-search                              ||                                                                      |
+|   ~ ml-ranker                                ||                                                                      |
+|   ~ ml-embed                                 ||                                                                      |
+|   ~ cache-warm                               ||                                                                      |
++----------------------------------------------++----------------------------------------------------------------------+
+ enter type into it   x stop   r restart   o open in browser   c select text   z zoom             ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
+1: 0-6 dim, 7-14 bold reversed, 16-30 dim, 33-43 dim, 46-47 dim, 48-63 yellow, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+2: 0 darkgray, 2-3 bold, 4-21 dim, 23-48 darkgray, 50-60 bold, 61-76 dim, 77-78 blue, 79-84 dim, 86-94 darkgray, 96-117 dim, 119 darkgray
+3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-78 dim, 119 darkgray
+4: 0 darkgray, 1-46 reversed, 47-48 darkgray, 50-74 dim, 119 darkgray
+5: 0 darkgray, 4-13 blue, 47-48 darkgray, 119 darkgray
+6: 0 darkgray, 4-14 blue, 47-48 darkgray, 50 color2, 119 darkgray
+7: 0 darkgray, 4-16 blue, 47-48 darkgray, 50 color2, 119 darkgray
+8: 0 darkgray, 4-15 blue, 47-48 darkgray, 50-68 bold, 119 darkgray
+9: 0 darkgray, 4-15 blue, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+10: 0 darkgray, 4-16 blue, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+11: 0 darkgray, 4-18 blue, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+12: 0 darkgray, 4-15 blue, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+13: 0 darkgray, 4-16 blue, 47-48 darkgray, 50-57 dim, 79-81 color3, 119 darkgray
+14: 0 darkgray, 4-5 blue, 6-12 green, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+15: 0 darkgray, 4-5 blue, 6-14 green, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+16: 0 darkgray, 4-5 blue, 6-13 green, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+17: 0 darkgray, 4-5 dim, 6-18 dim green, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+18: 0 darkgray, 4-5 blue, 6-16 green, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+19: 0 darkgray, 4-5 blue, 6-14 magenta, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+20: 0 darkgray, 4-5 blue, 6-16 magenta, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+21: 0 darkgray, 4-5 blue, 6-14 magenta, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+22: 0 darkgray, 4-5 blue, 6-15 magenta, 47-48 darkgray, 50-57 dim, 79-81 color3, 119 darkgray
+23: 0 darkgray, 4-5 blue, 6-15 magenta, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+24: 0 darkgray, 4-5 blue, 6-13 magenta, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+25: 0 darkgray, 4-5 blue, 6-17 magenta, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+26: 0 darkgray, 4-5 blue, 6-15 magenta, 47-48 darkgray, 50-57 dim, 79-81 color2, 119 darkgray
+27: 0 darkgray, 4-5 blue, 6-16 darkgray, 47-48 darkgray, 119 darkgray
+28: 0 darkgray, 4-5 blue, 6-12 darkgray, 47-48 darkgray, 119 darkgray
+29: 0 darkgray, 4-5 blue, 6-16 darkgray, 47-48 darkgray, 119 darkgray
+30: 0 darkgray, 4-5 blue, 6-18 darkgray, 47-48 darkgray, 119 darkgray
+31: 0 darkgray, 4-5 blue, 6-17 darkgray, 47-48 darkgray, 119 darkgray
+32: 0 darkgray, 4-5 blue, 6-15 darkgray, 47-48 darkgray, 119 darkgray
+33: 0 darkgray, 4-5 blue, 6-15 cyan, 47-48 darkgray, 119 darkgray
+34: 0 darkgray, 4-5 blue, 6-16 cyan, 47-48 darkgray, 119 darkgray
+35: 0 darkgray, 4-5 blue, 6-14 green, 47-48 darkgray, 119 darkgray
+36: 0 darkgray, 4-5 blue, 6-13 green, 47-48 darkgray, 119 darkgray
+37: 0 darkgray, 4-5 blue, 6-15 dim blue, 47-48 darkgray, 119 darkgray
+38: 0-119 darkgray
+39: 1-5 bold, 6-21 dim, 22 bold, 23-30 dim, 31 bold, 32-42 dim, 43 bold, 44-62 dim, 63 bold, 64-78 dim, 79 bold, 80-87 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

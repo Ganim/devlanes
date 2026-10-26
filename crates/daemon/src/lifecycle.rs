@@ -82,6 +82,8 @@ pub(crate) struct SpawnRequest {
     pub ready_check: Option<&'static str>,
     /// `UnitSummary.role`: `service`, `task`, `setup`, `teardown` or `exec`.
     pub role: &'static str,
+    /// `services.<name>.keep_awake`: the lane never goes idle while this runs.
+    pub keep_awake: bool,
 }
 
 /// Copies an environment with its provenance (the type is deliberately not `Clone`).
@@ -119,6 +121,7 @@ impl SpawnRequest {
             display_name: service.display_name.clone(),
             ready_check: Some(ready_word(&service.ready.check)),
             role: "service",
+            keep_awake: service.keep_awake,
         }
     }
 
@@ -154,6 +157,7 @@ impl SpawnRequest {
             display_name: None,
             ready_check: None,
             role: kind.word(),
+            keep_awake: false,
         }
     }
 }
@@ -1210,6 +1214,8 @@ pub(crate) struct StartOptions {
 
 type Spawned = (UnitHost, Arc<dyn ManagedUnit>);
 
+use crate::idle::Activity;
+
 impl Inner {
     /// Spawns a unit, records its run and starts its state watcher.
     pub(crate) async fn spawn_unit(
@@ -1225,6 +1231,8 @@ impl Inner {
         if self.shutdown.is_cancelled() && !lane.st().shutdown_hooks {
             return Err(crate::engine::daemon_stopping());
         }
+        // A new unit of a frozen lane would find its neighbours suspended.
+        self.wake_lane(project, lane, Some(Activity::Command)).await;
         let (lane_path, record, reference, previous, color) = {
             let st = lane.st();
             let color = request
@@ -1385,6 +1393,7 @@ impl Inner {
                 display_name: request.display_name,
                 ready_check: request.ready_check,
                 role: request.role,
+                keep_awake: request.keep_awake,
             },
         );
         if request.kind == Kind::Service {
@@ -1980,6 +1989,8 @@ impl Inner {
         options: StartOptions,
     ) -> Result<StartResult, RpcError> {
         let op = lane.op.lock().await;
+        // Units already running are left alone, so a frozen lane would stay frozen.
+        self.wake_lane(project, lane, Some(Activity::Command)).await;
         // Installed once `op` is ours, until the start answered: a whole-lane stop
         // fires its token and waits for `op` next; a single-unit stop withdraws
         // units through it without waiting. A later start installs its own.
@@ -2555,6 +2566,10 @@ impl Inner {
         mine: Option<&Actor>,
         transient: bool,
     ) -> Result<Vec<UnitSummary>, RpcError> {
+        // Under `op`, so no freeze can begin after it. Stop signals and
+        // `lane.stop` tasks expect running processes, and paused containers
+        // would stay paused after the lane stopped.
+        self.wake_lane(project, lane, Some(Activity::Stop)).await;
         // A unit between its last cancellation check and its record would be
         // missed by the target list below.
         lane.spawns_settled().await;
@@ -2819,6 +2834,9 @@ impl Inner {
                 () = tokio::time::sleep(START_POLL) => {}
             }
         };
+        // With `op` held no freeze can begin after this; alongside a start the
+        // lane was never idle (a running start keeps it awake).
+        self.wake_lane(project, lane, Some(Activity::Stop)).await;
         // Alongside a start: counted as a spawn in flight throughout, so a whole
         // stop (which waits for spawns) sees what this restart spawns.
         let spawning = alongside.as_ref().map(|_| lane.spawn_guard());
@@ -3200,6 +3218,7 @@ impl Inner {
     ) -> (Vec<Value>, Vec<Value>) {
         let lanes = self.all_lanes();
         let _ops = self.lock_lanes(&lanes).await;
+        self.wake_all().await;
         let tasks = match hooks {
             Some(cancel) => self.shutdown_hooks(&lanes, cancel).await,
             None => Vec::new(),

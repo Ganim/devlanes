@@ -426,6 +426,20 @@ pub enum DebugCommand {
     },
     /// Show CPU and memory per lane and unit
     Top,
+    /// Freeze this lane's processes and own containers now, as if it had been idle for `lanes.freeze_after`
+    Freeze {
+        // Own id: `lane` would collide with the global `--lane`.
+        /// Lane to freeze ([project@]lane) [default: the current lane]
+        #[arg(id = "freeze_lane", value_name = "LANE")]
+        lane: Option<String>,
+    },
+    /// Resume a throttled or frozen lane
+    Thaw {
+        // Own id: `lane` would collide with the global `--lane`.
+        /// Lane to thaw ([project@]lane) [default: the current lane]
+        #[arg(id = "thaw_lane", value_name = "LANE")]
+        lane: Option<String>,
+    },
     /// Write a redacted archive to attach to a bug report and print its path
     #[command(
         long_about = "Write a redacted archive to attach to a bug report and print its path.\n\n\
@@ -977,6 +991,18 @@ impl Cli {
                     (Method::Subscribe, json!({"follow": follow}))
                 }
                 DebugCommand::Top => (Method::Metrics, json!({})),
+                DebugCommand::Freeze { lane } => {
+                    if lane.is_some() {
+                        context.lane.clone_from(lane);
+                    }
+                    (Method::DebugFreeze, json!({}))
+                }
+                DebugCommand::Thaw { lane } => {
+                    if lane.is_some() {
+                        context.lane.clone_from(lane);
+                    }
+                    (Method::DebugThaw, json!({}))
+                }
                 DebugCommand::Bundle {
                     to,
                     log_lines,

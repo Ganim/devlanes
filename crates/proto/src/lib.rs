@@ -162,6 +162,15 @@ pub enum Method {
     Errors,
     #[serde(rename = "why")]
     Why,
+    /// Freezes the context's lane now, whatever its idle timers say. Reply
+    /// [`LanePower`] fields `{lane, level}`. Errors: `lane_not_running`,
+    /// `lane_busy`, `lane_keep_awake` (`{units}`), `lane_has_orphans`.
+    #[serde(rename = "debug.freeze")]
+    DebugFreeze,
+    /// Thaws the context's lane and counts as activity: `{lane, thawed}`, where
+    /// `thawed` is false when the lane was not throttled or frozen.
+    #[serde(rename = "debug.thaw")]
+    DebugThaw,
     #[serde(rename = "url")]
     Url,
     /// Reply `{units, lanes, range_ms, system?, daemon?}`, or `{lane, peaks}`
@@ -532,6 +541,11 @@ pub struct UnitSummary {
     /// loopback `http://127.0.0.1:<port>`. Absent without hosts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    /// `throttled` or `frozen` while the lane is idle; absent when the unit runs
+    /// normally. `state` stays `ready`: a frozen unit keeps its ports and the
+    /// next request or connection thaws it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power: Option<String>,
 }
 
 /// Older daemons sized every attached unit, so a missing `pty` keeps doing that.
@@ -575,15 +589,21 @@ impl Default for UnitSummary {
             role: None,
             order: None,
             public_url: None,
+            power: None,
         }
     }
 }
 
 impl UnitSummary {
-    /// The state word for people: `running` for a `ready` unit whose readiness
-    /// is only that its process started, else [`UnitSummary::state`].
+    /// The state word for people: `frozen` or `throttled` for an idle unit,
+    /// `running` for a `ready` unit whose readiness is only that its process
+    /// started, else [`UnitSummary::state`].
     pub fn shown_state(&self) -> &str {
-        if self.state == "ready" && self.ready_check.as_deref() == Some("started") {
+        if self.state == "ready"
+            && let Some(power) = self.power.as_deref()
+        {
+            power
+        } else if self.state == "ready" && self.ready_check.as_deref() == Some("started") {
             "running"
         } else {
             &self.state
@@ -670,6 +690,27 @@ pub struct LaneSummary {
     /// `host_conflict` (another lane routes the same hostname).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<LaneWarning>,
+    /// Set while the lane is throttled or frozen for lack of activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power: Option<LanePower>,
+}
+
+/// An idle lane's power level and what it last saw as activity.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LanePower {
+    /// `throttled` or `frozen`.
+    pub level: String,
+    /// When the lane reached `level` (Unix ms).
+    pub since_ms: u64,
+    /// When the lane last had activity (Unix ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_ms: Option<u64>,
+    /// What that activity was: `proxy` (a request or WebSocket bytes through the
+    /// proxy), `connection` (a new TCP connection to one of the lane's ports),
+    /// `cpu`, `command` (a client command) or `stop` (a stop, restart or clean).
+    /// Absent when nothing was seen since the daemon started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<String>,
 }
 
 /// A container a lane uses (shared or per-lane) and its published host ports.
@@ -1032,6 +1073,16 @@ pub mod events {
     /// Code `windows_drive`: `{lane, path, drive}` inside WSL when the worktree
     /// is on a Windows drive such as `C:\`.
     pub const LANE_WARNING: &str = "lane.warning";
+    /// `{lane, level: throttled|frozen}` when an idle lane's processes were
+    /// throttled or frozen.
+    pub const LANE_IDLE: &str = "lane.idle";
+    /// `{lane, from: throttled|frozen, activity}` when a throttled or frozen lane
+    /// ran normally again; `activity` is a [`super::LanePower::last_activity`] word
+    /// or `stop` when a stop, restart or clean thawed it first.
+    pub const LANE_THAWED: &str = "lane.thawed";
+    /// `{lane, level, code, message}` when throttling or freezing a lane failed
+    /// and was undone; the lane is retried after its next activity.
+    pub const LANE_IDLE_FAILED: &str = "lane.idle_failed";
     /// `{stream_id, code, dropped_frames, dropped_bytes}`, sent only to the attached
     /// connection, when its terminal input was discarded. Code `input_overflow`:
     /// the unit was not reading and the oldest queued input was dropped.

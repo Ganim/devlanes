@@ -304,6 +304,14 @@ service_fields! {
     /// service starts all its copies when any copy's expression gives true. Defaults to true.
     #[schemars(extend("examples" = [true,false]))]
     autostart: Templated<bool>,
+    /// While this service runs, devlanes never throttles or freezes its lane, whatever
+    /// `lanes.throttle_after` and `lanes.freeze_after` in the user config say. Set it on
+    /// workers, queue consumers, schedulers and tunnels that do work without inbound
+    /// requests, which a frozen lane would otherwise stall. One such service keeps the
+    /// whole lane awake. An expression is evaluated for each lane, such as
+    /// `${{ lane.index == 0 }}` to keep only the main lane awake. Defaults to false.
+    #[schemars(extend("examples" = [true,false]))]
+    keep_awake: Templated<bool>,
     /// Folders mirrored while the service runs, such as build output a browser loads
     /// unpacked from a fixed path. Each entry copies `from` to `to` (default
     /// `~/devlanes/sync/<project>/<lane>/<folder>`) and follows changes; machines connected

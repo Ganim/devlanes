@@ -662,6 +662,116 @@ fn startup_settings() {
     assert_eq!("7.5 %".parse::<Percent>().expect("spaced"), Percent(7.5));
 }
 
+/// Idle lanes throttle at 5m and freeze at 15m by default; `0s` turns either off, and
+/// a throttle must come before the freeze.
+#[test]
+fn idle_lane_timers() {
+    let minutes = |n: u64| Some(std::time::Duration::from_secs(n * 60));
+    let defaults = parse_user("{}").expect("defaults").lanes;
+    assert_eq!(defaults.throttle_after(), minutes(5));
+    assert_eq!(defaults.freeze_after(), minutes(15));
+    assert_eq!(
+        defaults.throttle_after.0,
+        UserLanesConfig::default().throttle_after.0
+    );
+    let user = parse_user(USER).expect("user example").lanes;
+    assert_eq!(
+        (user.throttle_after(), user.freeze_after()),
+        (minutes(5), minutes(15))
+    );
+
+    for (source, throttle, freeze) in [
+        ("lanes: { throttle_after: 0s }", None, minutes(15)),
+        ("lanes: { freeze_after: 0s }", minutes(5), None),
+        (
+            "lanes: { throttle_after: 0s, freeze_after: 0s }",
+            None,
+            None,
+        ),
+        // Throttling off lifts the ordering rule, and so does freezing off.
+        (
+            "lanes: { throttle_after: 0s, freeze_after: 1m }",
+            None,
+            minutes(1),
+        ),
+        (
+            "lanes: { throttle_after: 1h, freeze_after: 0s }",
+            minutes(60),
+            None,
+        ),
+        (
+            "lanes: { throttle_after: 1m, freeze_after: 2m }",
+            minutes(1),
+            minutes(2),
+        ),
+    ] {
+        let lanes = parse_user(source).expect(source).lanes;
+        assert_eq!(
+            (lanes.throttle_after(), lanes.freeze_after()),
+            (throttle, freeze),
+            "{source}"
+        );
+    }
+
+    for (source, key, line) in [
+        (
+            "lanes:\n  throttle_after: 15m\n  freeze_after: 15m\n",
+            "lanes.throttle_after",
+            2,
+        ),
+        ("lanes:\n  throttle_after: 20m\n", "lanes.throttle_after", 2),
+        (
+            "lanes:\n  throttle_after: 10m\n  freeze_after: 5m\n",
+            "lanes.throttle_after",
+            2,
+        ),
+        // A lone freeze below the default throttle points at the line the file has.
+        (
+            "lanes:\n  data_dir: ~/d\n  freeze_after: 2m\n",
+            "lanes.freeze_after",
+            3,
+        ),
+    ] {
+        let error = parse_user(source).expect_err(source);
+        assert!(
+            error.message.starts_with(&format!("{key}: ")),
+            "{source}: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("lanes.throttle_after")
+                && error.message.contains("lanes.freeze_after"),
+            "{source}: {}",
+            error.message
+        );
+        assert_eq!(error.location.line, line, "{source}: {}", error.message);
+    }
+    // Both messages carry the values in effect, set or default.
+    assert_eq!(
+        parse_user("lanes: { throttle_after: 5m, freeze_after: 5m }")
+            .expect_err("equal")
+            .message,
+        "lanes.freeze_after: 5m must be longer than lanes.throttle_after, which is 5m; \
+         lower lanes.throttle_after or set it to 0s"
+    );
+    assert_eq!(
+        parse_user("lanes: { throttle_after: 20m }")
+            .expect_err("after the default freeze")
+            .message,
+        "lanes.throttle_after: 20m must be shorter than lanes.freeze_after, which is 15m"
+    );
+
+    // A lenient load drops only the key at fault, keeping the rest of `lanes`.
+    let (config, issues) = parse_user_lenient(
+        "config.yaml",
+        "lanes:\n  data_dir: ~/d\n  freeze_after: 2m\n",
+    );
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(config.lanes.data_dir.as_deref(), Some("~/d"));
+    assert_eq!(config.lanes.freeze_after(), minutes(15));
+    assert!(parse_user("lanes: { freeze_after: 15 }").is_err());
+}
+
 /// Diagnostics after merging should point into the local file, not a rewritten document.
 #[test]
 fn local_error_location() {

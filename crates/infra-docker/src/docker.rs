@@ -208,6 +208,25 @@ impl DockerInfra {
                     .as_ref()
                     .and_then(|state| state.running)
                     .unwrap_or(false);
+                let paused = existing
+                    .state
+                    .as_ref()
+                    .and_then(|state| state.paused)
+                    .unwrap_or(false);
+                // A frozen lane whose thaw failed still starts. Shared containers are
+                // never paused by devlanes, so one that is paused stays that way.
+                if paused && matches!(spec.scope, Scope::Lane(_)) {
+                    match self
+                        .docker
+                        .unpause_container(&name)
+                        .await
+                        .map_err(Error::from)
+                    {
+                        Ok(()) => {}
+                        Err(error) if error.is_state_race() => {}
+                        Err(error) => return Err(error),
+                    }
+                }
                 if existing_labels.get(labels::CONFIG_HASH) != Some(&hash) {
                     self.remove(&name).await?;
                     self.create(spec, &mounts, &hash, &name).await?;
@@ -366,6 +385,61 @@ impl DockerInfra {
             removed.volumes.push(volume.name);
         }
         Ok(removed)
+    }
+
+    /// Pauses the lane's own running containers while the lane is frozen. Shared
+    /// containers and other lanes are untouched. Returns how many were paused; one that
+    /// stopped, vanished or got paused by someone else in the meantime is skipped.
+    pub async fn pause_lane(&self, project: &str, lane: u32) -> Result<usize, Error> {
+        let mut paused = 0;
+        for id in self.lane_ids_in(project, lane, "running").await? {
+            match self.docker.pause_container(&id).await.map_err(Error::from) {
+                Ok(()) => paused += 1,
+                Err(error) if error.is_state_race() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(paused)
+    }
+
+    /// Unpauses the lane's own paused containers. Returns how many were unpaused.
+    ///
+    /// Docker reports a container `unhealthy` from the unpause until its next
+    /// healthcheck runs, without sending an event; [`Self::health`] reads it as
+    /// healthy when it was healthy before the pause.
+    pub async fn unpause_lane(&self, project: &str, lane: u32) -> Result<usize, Error> {
+        let mut unpaused = 0;
+        for id in self.lane_ids_in(project, lane, "paused").await? {
+            match self
+                .docker
+                .unpause_container(&id)
+                .await
+                .map_err(Error::from)
+            {
+                Ok(()) => unpaused += 1,
+                Err(error) if error.is_state_race() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(unpaused)
+    }
+
+    /// Ids of the lane-scoped containers of `project` in Docker state `status`. The
+    /// lane and scope labels together never match a shared container.
+    async fn lane_ids_in(
+        &self,
+        project: &str,
+        lane: u32,
+        status: &str,
+    ) -> Result<Vec<String>, Error> {
+        let mut filters = label_filters(&scope_labels(project, Scope::Lane(lane)));
+        filters.insert("status".to_owned(), vec![status.to_owned()]);
+        Ok(self
+            .list(&filters, true)
+            .await?
+            .into_iter()
+            .filter_map(|summary| summary.id)
+            .collect())
     }
 
     /// Container lifecycle events for containers carrying all `labels` (for example

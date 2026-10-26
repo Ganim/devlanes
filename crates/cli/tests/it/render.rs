@@ -129,6 +129,14 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
     missing["reason"] =
         json!({"code": "worktree_missing", "data": {"path": "/work/gone"}, "exit_code": 1});
     let page = |items: Vec<Value>| json!({"items": items, "truncated": false, "next_cursor": null});
+    // Idle lanes print their age; whole minutes plus a margin keep snapshots stable.
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("milliseconds fit u64");
     vec![
         ("start", Method::Start, start_result()),
         ("start_queued", Method::Start, start_queued),
@@ -205,6 +213,69 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
             ]),
         ),
         ("status_one_lane", Method::Status, page(vec![status_lane])),
+        // An idle lane keeps `state`; `power` adds the level and since when.
+        ("status_idle", Method::Status, {
+            let idle = |level: &str, minutes: u64| {
+                let mut api = unit("api", "ready");
+                api["power"] = json!(level);
+                let mut worker = unit("worker", "ready");
+                worker["power"] = json!(level);
+                worker["ready_check"] = json!("started");
+                (
+                    vec![api, worker],
+                    json!({"level": level, "since_ms": now - minutes * 60_000 - 5_000,
+                           "last_activity_ms": now - (minutes + 5) * 60_000, "last_activity": "proxy"}),
+                )
+            };
+            let (units, power) = idle("frozen", 12);
+            let mut frozen = lane(Some(0), "main", "running", units);
+            frozen["power"] = power;
+            let (units, power) = idle("throttled", 3);
+            let mut throttled = lane(Some(2), "feat/billing", "running", units);
+            throttled["power"] = power;
+            page(vec![
+                frozen,
+                throttled,
+                lane(Some(3), "fix/login", "running", vec![unit("api", "ready")]),
+            ])
+        }),
+        ("status_one_frozen_lane", Method::Status, {
+            let mut api = unit("api", "ready");
+            api["power"] = json!("frozen");
+            let mut frozen = lane(Some(0), "main", "running", vec![api]);
+            frozen["power"] = json!({"level": "frozen", "since_ms": now - 30 * 60_000 - 5_000});
+            page(vec![frozen])
+        }),
+        (
+            "debug_freeze",
+            Method::DebugFreeze,
+            json!({"lane": "acme@2", "level": "frozen"}),
+        ),
+        (
+            "debug_thaw",
+            Method::DebugThaw,
+            json!({"lane": "acme@2", "thawed": true}),
+        ),
+        (
+            "debug_thaw_not_idle",
+            Method::DebugThaw,
+            json!({"lane": "acme@2", "thawed": false}),
+        ),
+        (
+            "events_idle",
+            Method::Subscribe,
+            page(vec![
+                json!({"seq": 1, "event": "lane.idle", "data": {"lane": "acme@2", "level": "throttled"}}),
+                json!({"seq": 2, "event": "lane.idle", "data": {"lane": "acme@2", "level": "frozen"}}),
+                json!({"seq": 3, "event": "lane.thawed", "data": {"lane": "acme@2", "from": "frozen", "activity": "proxy"}}),
+                json!({"seq": 4, "event": "lane.idle_failed", "data": {"lane": "acme@0", "level": "frozen",
+                    "code": "freeze_failed", "message": "api: operation not permitted"}}),
+                json!({"seq": 5, "event": "unit.changed", "data": {"unit": {"name": "api", "lane": "acme@2", "state": "ready", "power": "frozen"}}}),
+                json!({"seq": 6, "event": "lane.thawed", "data": {"lane": "acme@0", "from": "throttled", "activity": "stop"}}),
+                json!({"seq": 7, "event": "lane.idle_failed", "data": {"lane": "acme@2", "level": "normal",
+                    "code": "thaw_failed", "message": "api: no such process"}}),
+            ]),
+        ),
         ("status_lane_warnings", Method::Status, {
             let mut warned = lane(
                 Some(2),
@@ -1514,6 +1585,39 @@ fn human_status_colors_unit_names_by_tag_and_failures_red() {
     assert!(!plain.contains('\x1b'));
 }
 
+/// Frozen and throttled are quiet states: dim, never the warning yellow.
+#[test]
+fn human_status_dims_idle_units_and_lanes() {
+    let cli = Cli::parse_from(["devlanes"]);
+    let colored = Runtime::resolve(
+        &cli,
+        Signals {
+            env_output: Some("human".into()),
+            stdout_tty: true,
+            ..Signals::default()
+        },
+    )
+    .expect("runtime");
+    let mut api = unit("api", "ready");
+    api["power"] = json!("frozen");
+    let mut worker = unit("worker", "ready");
+    worker["power"] = json!("throttled");
+    let mut idle = lane(Some(2), "feat/billing", "running", vec![api, worker]);
+    idle["power"] = json!({"level": "frozen", "since_ms": 0});
+    let human = colored
+        .reporter()
+        .result(&Report::new(Method::Status, &json!({"items": [idle]})))
+        .expect("render")
+        .stdout;
+    assert!(human.contains("\x1b[2mfrozen\x1b[0m"), "{human:?}");
+    assert!(human.contains("\x1b[2mthrottled\x1b[0m"), "{human:?}");
+    assert!(
+        human.contains("\x1b[32mrunning\x1b[0m \x1b[2mfrozen "),
+        "{human:?}"
+    );
+    assert!(!human.contains("\x1b[33m"), "{human:?}");
+}
+
 #[test]
 fn agent_output_stays_within_the_budget() {
     let units: Vec<Value> = (0..600)
@@ -1910,6 +2014,29 @@ fn daemon_errors_are_worded_with_hints() {
             1,
         ),
         RpcError::new("client_disconnected", Value::Null, 4),
+        RpcError::new("lane_not_running", json!({"lane": "acme@2"}), 1),
+        RpcError::new("lane_busy", json!({"lane": "acme@2"}), 1),
+        RpcError::new(
+            "lane_keep_awake",
+            json!({"lane": "acme@2", "units": ["worker", "queue"]}),
+            1,
+        ),
+        RpcError::new(
+            "lane_has_orphans",
+            json!({"lane": "acme@2", "units": ["bg"]}),
+            1,
+        ),
+        RpcError::new(
+            "idle_failed",
+            json!({"lane": "acme@2", "level": "frozen", "message": "api: operation not permitted"}),
+            1,
+        ),
+        RpcError::new("throttle_unsupported", json!({"lane": "acme@2"}), 1),
+        RpcError::new(
+            "thaw_failed",
+            json!({"lane": "acme@2", "level": "normal", "message": "api: no such process"}),
+            1,
+        ),
         RpcError::new(
             "helper_version_mismatch",
             json!({"message": "The installed hosts helper is version 0.1.0 and devlanes is 0.2.0. Run `devlanes certs trust --hosts` to reinstall it.",

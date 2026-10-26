@@ -1938,6 +1938,7 @@ pub(crate) fn new_lane(worktree: WorktreeId, st: LaneSt) -> Arc<LaneRt> {
         st: std::sync::Mutex::new(st),
         publish: std::sync::Mutex::new(()),
         watch: tokio_util::sync::CancellationToken::new(),
+        power: tokio::sync::Mutex::new(()),
     })
 }
 

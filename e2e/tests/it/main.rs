@@ -5,6 +5,7 @@ mod diagnostics;
 // Docker test names must start with `docker_` including the module path, for the CI filter.
 mod docker_full;
 mod docker_pg_redis;
+mod idle;
 mod lanes;
 mod lifecycle;
 mod proxy;

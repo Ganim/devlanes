@@ -1088,13 +1088,21 @@
     },
     "UserLanesConfig": {
       "additionalProperties": false,
-      "description": "Machine settings for lanes. Each lane gets its own data folder at `<data_dir>/<project>/<lane id>`, available as `${{ lane.data_path }}` and `DEVLANES_LANE_DATA`. devlanes creates it when the lane is created and before each start, and `devlanes lane clean` deletes it.",
+      "description": "Machine settings for lanes: where their data folders live, and when idle lanes are throttled or frozen. Each lane gets its own data folder at `<data_dir>/<project>/<lane id>`, available as `${{ lane.data_path }}` and `DEVLANES_LANE_DATA`. devlanes creates it when the lane is created and before each start, and `devlanes lane clean` deletes it.",
       "examples": [
         {
           "data_dir": "~/.devlanes/data"
+        },
+        {
+          "freeze_after": "15m",
+          "throttle_after": "5m"
+        },
+        {
+          "freeze_after": "1h",
+          "throttle_after": "0s"
         }
       ],
-      "markdownDescription": "Machine settings for lanes. Each lane gets its own data folder at `<data_dir>/<project>/<lane id>`, available as `${{ lane.data_path }}` and `DEVLANES_LANE_DATA`. devlanes creates it when the lane is created and before each start, and `devlanes lane clean` deletes it.",
+      "markdownDescription": "Machine settings for lanes: where their data folders live, and when idle lanes are throttled or frozen. Each lane gets its own data folder at `<data_dir>/<project>/<lane id>`, available as `${{ lane.data_path }}` and `DEVLANES_LANE_DATA`. devlanes creates it when the lane is created and before each start, and `devlanes lane clean` deletes it.",
       "properties": {
         "data_dir": {
           "default": null,
@@ -1108,6 +1116,27 @@
             "string",
             "null"
           ]
+        },
+        "freeze_after": {
+          "$ref": "#/$defs/ConfigDuration",
+          "default": "900000ms",
+          "description": "After this long without activity, devlanes freezes a lane: it suspends every process of the lane and pauses the lane's own containers. Shared infra is never paused. Ports and process state are kept, so a frozen lane still counts as running. Activity is a request through the proxy, a new connection to one of the lane's ports, the lane's services using CPU, or a devlanes command on the lane; any of it resumes a frozen lane and restarts the timer. A request through the proxy resumes the lane at once and then goes through; a direct connection to a port is noticed within about half a second. When both are set above `0s`, it must be longer than `throttle_after` (`5m` unless set). A running service with `services.<name>.keep_awake: true` keeps its whole lane awake. Defaults to `15m`; `0s` turns freezing off. The daemon reads it when it starts.",
+          "examples": [
+            "15m",
+            "1h",
+            "0s"
+          ],
+          "markdownDescription": "After this long without activity, devlanes freezes a lane: it suspends every process of the lane and pauses the lane's own containers. Shared infra is never paused. Ports and process state are kept, so a frozen lane still counts as running. Activity is a request through the proxy, a new connection to one of the lane's ports, the lane's services using CPU, or a devlanes command on the lane; any of it resumes a frozen lane and restarts the timer. A request through the proxy resumes the lane at once and then goes through; a direct connection to a port is noticed within about half a second. When both are set above `0s`, it must be longer than `throttle_after` (`5m` unless set). A running service with `services.<name>.keep_awake: true` keeps its whole lane awake. Defaults to `15m`; `0s` turns freezing off. The daemon reads it when it starts."
+        },
+        "throttle_after": {
+          "$ref": "#/$defs/ConfigDuration",
+          "default": "300000ms",
+          "description": "After this long without activity, a lane's processes run at background priority: lower CPU priority, and efficiency cores on machines that have them. They keep serving requests. Activity is a request through the proxy, a new connection to one of the lane's ports, the lane's services using CPU, or a devlanes command on the lane; any of it restores normal priority and restarts the timer. macOS and Windows only; Linux has no throttling, so lanes there stay at normal priority until `freeze_after`. When both are set above `0s`, it must be shorter than `freeze_after`. A running service with `services.<name>.keep_awake: true` keeps its whole lane at normal priority. Defaults to `5m`; `0s` turns throttling off. The daemon reads it when it starts.",
+          "examples": [
+            "5m",
+            "0s"
+          ],
+          "markdownDescription": "After this long without activity, a lane's processes run at background priority: lower CPU priority, and efficiency cores on machines that have them. They keep serving requests. Activity is a request through the proxy, a new connection to one of the lane's ports, the lane's services using CPU, or a devlanes command on the lane; any of it restores normal priority and restarts the timer. macOS and Windows only; Linux has no throttling, so lanes there stay at normal priority until `freeze_after`. When both are set above `0s`, it must be shorter than `freeze_after`. A running service with `services.<name>.keep_awake: true` keeps its whole lane at normal priority. Defaults to `5m`; `0s` turns throttling off. The daemon reads it when it starts."
         }
       },
       "type": "object"
@@ -1185,15 +1214,25 @@
     "lanes": {
       "$ref": "#/$defs/UserLanesConfig",
       "default": {
-        "data_dir": null
+        "data_dir": null,
+        "freeze_after": "900000ms",
+        "throttle_after": "300000ms"
       },
-      "description": "Where lane data folders (`lane.data_path`) live on this machine.",
+      "description": "Where lane data folders (`lane.data_path`) live on this machine, and how long a lane may sit without activity before devlanes throttles or freezes it.",
       "examples": [
         {
           "data_dir": "~/.devlanes/data"
+        },
+        {
+          "freeze_after": "15m",
+          "throttle_after": "5m"
+        },
+        {
+          "freeze_after": "1h",
+          "throttle_after": "0s"
         }
       ],
-      "markdownDescription": "Where lane data folders (`lane.data_path`) live on this machine."
+      "markdownDescription": "Where lane data folders (`lane.data_path`) live on this machine, and how long a lane may sit without activity before devlanes throttles or freezes it."
     },
     "logs": {
       "$ref": "#/$defs/LogsConfig",

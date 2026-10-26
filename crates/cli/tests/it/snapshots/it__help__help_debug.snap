@@ -11,6 +11,8 @@ Commands:
   errors  List failed units, crash counts, recent error lines and port conflicts
   events  Print the daemon's event stream: lane, unit, task and port events
   top     Show CPU and memory per lane and unit
+  freeze  Freeze this lane's processes and own containers now, as if it had been idle for `lanes.freeze_after`
+  thaw    Resume a throttled or frozen lane
   bundle  Write a redacted archive to attach to a bug report and print its path
   help    Print this message or the help of the given subcommand(s)
 

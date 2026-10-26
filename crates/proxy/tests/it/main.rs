@@ -1,8 +1,9 @@
 use std::{
     convert::Infallible,
     net::SocketAddr,
+    pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -11,7 +12,8 @@ use std::{
 use bytes::Bytes;
 use devlanes_pki::CertificateAuthority;
 use devlanes_proxy::{
-    HostHeader, Proxy, ProxyConfig, ProxyLimits, Route, RouteState, RouteTable, Upstream,
+    HostHeader, LaneActivity, Proxy, ProxyConfig, ProxyLimits, Route, RouteState, RouteTable,
+    Upstream,
 };
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, Empty, Full};
@@ -20,6 +22,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::oneshot,
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -1259,6 +1262,213 @@ async fn certificate_cache_survives_state_updates() -> Result {
         ])?);
         let rotated = presented_leaf(&ca, running.address, "web.lane.localhost").await?;
         assert_ne!(first, rotated);
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
+}
+
+/// Records lane activity and hands out one thaw future when `thaw` is set.
+#[derive(Default)]
+struct Lanes {
+    requests: Mutex<Vec<String>>,
+    streams: Mutex<Vec<String>>,
+    thaw: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl Lanes {
+    /// Owners passed to `request` so far.
+    fn requests(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Owners passed to `stream` so far.
+    fn streams(&self) -> Vec<String> {
+        self.streams
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Makes the next `request` return a future that ends when the sender fires or drops.
+    fn freeze(&self) -> oneshot::Sender<()> {
+        let (sender, receiver) = oneshot::channel();
+        *self.thaw.lock().unwrap_or_else(PoisonError::into_inner) = Some(receiver);
+        sender
+    }
+}
+
+impl LaneActivity for Lanes {
+    /// Records the owner and returns the pending thaw, if any.
+    fn request(&self, owner: &str) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(owner.to_string());
+        let thaw = self
+            .thaw
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()?;
+        Some(Box::pin(async move {
+            let _ = thaw.await;
+        }))
+    }
+
+    /// Records the owner.
+    fn stream(&self, owner: &str) {
+        self.streams
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(owner.to_string());
+    }
+}
+
+/// A proxy config that reports to `lanes`.
+fn reporting(lanes: &Arc<Lanes>) -> ProxyConfig {
+    ProxyConfig {
+        activity: Some(lanes.clone()),
+        ..ProxyConfig::default()
+    }
+}
+
+/// Reads an HTTP/1 head byte by byte, so bytes after it stay in the socket.
+async fn read_head<I: AsyncRead + Unpin>(io: &mut I) -> Result<String> {
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(io.read_u8().await?);
+    }
+    Ok(String::from_utf8(head)?)
+}
+
+/// Only forwarded requests to routes with an owner are reported; idle pages, unknown
+/// hosts and unowned routes are not.
+#[tokio::test]
+async fn lane_activity_reports_forwarded_requests() -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let upstream = fixture(false, false).await?;
+        let mut ready = Route::new("app.acme.localhost", upstream.address);
+        ready.owner = Some("acme@0".into());
+        let mut idle = Route::new("idle.acme.localhost", upstream.address);
+        idle.owner = Some("acme@1".into());
+        idle.state = RouteState::Idle;
+        let unowned = Route::new("plain.acme.localhost", upstream.address);
+        let lanes = Arc::new(Lanes::default());
+        let proxy = Proxy::new(
+            reporting(&lanes),
+            RouteTable::new(vec![ready, idle, unowned])?,
+        );
+        let running = run_proxy(proxy, None).await?;
+        for (host, status) in [
+            ("app.acme.localhost", 200),
+            ("idle.acme.localhost", 503),
+            ("other.acme.localhost", 404),
+            ("plain.acme.localhost", 200),
+        ] {
+            let response =
+                request(TcpStream::connect(running.address).await?, host, "/", &[]).await?;
+            assert_eq!(response.status(), status, "{host}");
+        }
+        assert_eq!(lanes.requests(), ["acme@0"]);
+        assert!(lanes.streams().is_empty());
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
+}
+
+/// A request to a thawing lane reaches the upstream only after the thaw ends, or after
+/// `thaw_wait` when the thaw never ends.
+#[tokio::test]
+async fn requests_wait_for_thaw() -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (upstream, connections) = keepalive_fixture("up").await?;
+        let mut route = Route::new("app.acme.localhost", upstream.address);
+        route.owner = Some("acme@0".into());
+        let table = RouteTable::new(vec![route])?;
+        let lanes = Arc::new(Lanes::default());
+        let running = run_proxy(Proxy::new(reporting(&lanes), table.clone()), None).await?;
+        let thawed = lanes.freeze();
+        let pending = tokio::spawn(request(
+            TcpStream::connect(running.address).await?,
+            "app.acme.localhost",
+            "/",
+            &[],
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!pending.is_finished());
+        assert_eq!(connections.load(Ordering::SeqCst), 0);
+        assert_eq!(lanes.requests(), ["acme@0"]);
+        let _ = thawed.send(());
+        assert_eq!(text(pending.await??).await?, "up 1");
+
+        let thaw_wait = Duration::from_millis(200);
+        let limits = ProxyLimits {
+            thaw_wait,
+            ..ProxyLimits::default()
+        };
+        let lanes = Arc::new(Lanes::default());
+        let running = run_proxy(
+            Proxy::new(reporting(&lanes), table).with_limits(limits),
+            None,
+        )
+        .await?;
+        // Held to the end, so the thaw never finishes.
+        let _stuck = lanes.freeze();
+        let started = tokio::time::Instant::now();
+        let response = request(
+            TcpStream::connect(running.address).await?,
+            "app.acme.localhost",
+            "/",
+            &[],
+        )
+        .await?;
+        assert!(started.elapsed() >= thaw_wait);
+        assert_eq!(text(response).await?, "up 2");
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
+}
+
+/// Client bytes on an upgraded stream are reported; upstream bytes alone are not.
+#[tokio::test]
+async fn upgraded_client_bytes_are_reported() -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let mut route = Route::new("app.acme.localhost", listener.local_addr()?);
+        route.owner = Some("acme@0".into());
+        let lanes = Arc::new(Lanes::default());
+        let running = run_proxy(
+            Proxy::new(reporting(&lanes), RouteTable::new(vec![route])?),
+            None,
+        )
+        .await?;
+        let mut client = TcpStream::connect(running.address).await?;
+        client
+            .write_all(
+                b"GET /ws HTTP/1.1\r\nHost: app.acme.localhost\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n",
+            )
+            .await?;
+        let (mut upstream, _) = listener.accept().await?;
+        read_head(&mut upstream).await?;
+        upstream
+            .write_all(
+                b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\nhello",
+            )
+            .await?;
+        let head = read_head(&mut client).await?;
+        assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+        let mut hello = [0u8; 5];
+        client.read_exact(&mut hello).await?;
+        assert_eq!(&hello, b"hello");
+        assert_eq!(lanes.requests(), ["acme@0"]);
+        assert!(lanes.streams().is_empty());
+        client.write_all(b"ping").await?;
+        let mut ping = [0u8; 4];
+        upstream.read_exact(&mut ping).await?;
+        assert_eq!(&ping, b"ping");
+        assert_eq!(lanes.streams(), ["acme@0"]);
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })
     .await?

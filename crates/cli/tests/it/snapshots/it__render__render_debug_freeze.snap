@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+frozen acme@2
+  a request, a connection or a command thaws it, or run devlanes debug thaw acme@2
+--- plain (exit 0)
+frozen acme@2
+  a request, a connection or a command thaws it, or run devlanes debug thaw acme@2
+--- agent (exit 0)
+frozen acme@2
+  a request, a connection or a command thaws it, or run devlanes debug thaw acme@2

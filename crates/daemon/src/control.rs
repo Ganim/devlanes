@@ -845,6 +845,7 @@ impl Inner {
             // An exec unit has no readiness probe: alive is ready.
             ready_check: Some("started"),
             role: "exec",
+            keep_awake: false,
         };
         // Held until the unit is recorded, so a clean or reset that begins meanwhile
         // waits and then stops it, or refuses it once the lane is released.
@@ -1230,6 +1231,7 @@ impl Inner {
         // unit after the stop and before the records it would need are gone.
         let lanes = self.all_lanes();
         let _ops = self.lock_lanes(&lanes).await;
+        self.wake_all().await;
         // `exec` and `run` take no `op`: interrupt runs and wait for spawns in
         // flight, so the stop below sees every unit.
         let mut closed = Vec::with_capacity(lanes.len());
@@ -1319,6 +1321,9 @@ impl Inner {
     ) -> Result<Value, RpcError> {
         let ((project, lane), spec) = self.infra_for(context).await?;
         let _op = lane.op.lock().await;
+        // Compose and Docker refuse to start paused containers.
+        self.wake_lane(&project, &lane, Some(crate::idle::Activity::Command))
+            .await;
         let up = self.integ.infra.up(&spec).await.map_err(RpcError::from)?;
         {
             let mut st = lane.st();

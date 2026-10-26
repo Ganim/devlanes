@@ -57,7 +57,7 @@ services:
     tags: [worker]
 ```
 
-A worker has no port, so `ready` defaults to `started`, which reports a crashed-then-watching process as ready. Have it print one line when it is connected and wait for that line. `pty: false` gives it pipes; some loggers behave better without a terminal. `stop` sets the signal and grace period before the process tree is killed, for consumers that finish in-flight jobs on `SIGINT`.
+A worker has no port, so `ready` defaults to `started`, which reports a crashed-then-watching process as ready. Have it print one line when it is connected and wait for that line. `pty: false` gives it pipes; some loggers behave better without a terminal. `stop` sets the signal and grace period before the process tree is killed, for consumers that finish in-flight jobs on `SIGINT`. A worker waiting for jobs gets no requests, so its lane would freeze after `lanes.freeze_after`; `keep_awake: true` keeps the lane awake while the worker runs ([idle lanes](lifecycle.md#idle-lanes)).
 
 Cron-like processes and one-shot jobs are tasks, not services: a service that exits shows as failed.
 
@@ -133,20 +133,7 @@ Each replica is a unit `worker.1`, `worker.2`, `worker.3` with its own `PORT`. `
 
 ## Services that start on demand
 
-```yaml
-services:
-  storybook:
-    run_script:
-      file: packages/ui/package.json
-      name: storybook
-    hosts: "storybook.${{ lane.domain }}"
-    autostart: false
-  stripe-listen:
-    run: stripe listen --forward-to ${{ services.api.url }}/webhooks/stripe
-    autostart: false
-```
-
-`devlanes start storybook` or the TUI starts them; globs in profiles skip them, names and tags include them. The proxy answers their hostnames with a page that names the start command while they are idle. `autostart` also takes an expression, such as `${{ lane.index == 0 }}`, evaluated per lane.
+`autostart: false` is covered in [lane lifecycle](lifecycle.md#services-that-start-on-demand).
 
 ## One lane's frontend against another lane's backend
 
@@ -164,46 +151,7 @@ profiles:
 
 ## Lifecycle tasks
 
-```yaml
-tasks:
-  install:
-    run: [pnpm, install, --frozen-lockfile]
-    when: lane.create
-    timeout: 10m
-  codegen:
-    run_script:
-      file: package.json
-      name: codegen
-    when: lane.create
-  migrate:
-    run_script:
-      file: apps/api/package.json
-      name: db:migrate
-    when: lane.start
-  build-libs:
-    run_script:
-      file: package.json
-      name: build:libs
-    when: lane.start
-    profiles: [default, e2e]
-  seed:
-    run_script:
-      file: tools/seed/package.json
-      name: start
-    when: lane.create
-    after: services
-    timeout: 15m
-  reset-db:
-    steps: [infra.teardown.database, infra.setup.database, migrate, seed]
-    confirm: Drops ${{ lane.db_name }} and re-seeds it
-  prisma-login:
-    run: pnpm prisma login
-    interactive: true
-```
-
-Start order: infra, setup, `lane.create` tasks (until they succeed once per lane), `lane.start` tasks (every start, in file order), services together, `after: services` tasks. A failed task before services fails the start and prints its log tail. `devlanes run reset-db` runs a task by hand; `devlanes run --list` shows them. Tasks with `confirm` need `--yes` without a terminal, and `interactive` tasks get your terminal and never run from a hook.
-
-New worktrees have no `node_modules`, so `install` with `when: lane.create` is what makes `git worktree add && devlanes start` work with nothing else.
+Installs, migrations and seeds that run at lane events are covered in [lane lifecycle](lifecycle.md#lifecycle-tasks).
 
 ## Tags, profiles and templates
 
@@ -249,11 +197,11 @@ profiles:
 
 A unit's colour comes from its first tag with a `color` under `tags`, else its first category tag (`api`, `web`, `worker`, `db`), so put the category tag first and selection tags after. Profiles select by name, glob or `+tag`; with a `default` profile, a lane's first plain `devlanes start` starts exactly that selection. `--profile` repeats and the union is started.
 
-After that, a plain `devlanes start` of an idle lane brings back what it ran: the services you started (by profile or by name) and did not stop, with the same profiles. That is what makes a reboot or a daemon crash cost one command. On a lane that still runs, a plain start also starts what its profiles select and is missing, such as a service you just added. `devlanes stop` without unit names forgets what ran, so the next plain start uses the `default` profile again; stopping one service only leaves that service out. Set `start.restore: false` in `~/.devlanes/config.yaml` to always start the `default` profile.
+After that, a plain `devlanes start` brings back what the lane ran instead ([bringing a lane back](lifecycle.md#bringing-a-lane-back)).
 
 ## Monorepo with several apps
 
-One `devlanes.yaml` at the repository root, one service per app, `run_script` pointing at each package's `package.json`. `cwd` is the script's directory automatically. Shared libraries that need building before the apps start are a `lane.start` task (`build-libs` above) or a watcher service tagged `watcher`.
+One `devlanes.yaml` at the repository root, one service per app, `run_script` pointing at each package's `package.json`. `cwd` is the script's directory automatically. Shared libraries that need building before the apps start are a `lane.start` task (`build-libs` in [lifecycle tasks](lifecycle.md#lifecycle-tasks)) or a watcher service tagged `watcher`.
 
 If an app has its own `devlanes.yaml` in a subdirectory, that directory is the project root for devlanes when you run it there; a repository can hold several independent projects that way, each with its own name, lanes and ports.
 

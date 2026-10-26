@@ -93,9 +93,19 @@ fn shorten(value: &mut Value) {
     }
 }
 
-/// `20000ms` as `20s`; `None` for anything else.
+/// `duration` in its largest exact unit, as config.yaml would hold it (`5m`).
+pub(crate) fn short_duration_of(duration: crate::ConfigDuration) -> String {
+    let text = String::from(duration);
+    short_duration(&text).unwrap_or(text)
+}
+
+/// `20000ms` as `20s`, and `0ms` as `0s`, the form the docs use to turn a timer
+/// off; `None` for anything else.
 fn short_duration(text: &str) -> Option<String> {
     let millis: u64 = digits(text.strip_suffix("ms")?)?;
+    if millis == 0 {
+        return Some("0s".into());
+    }
     let unit = [
         ("d", 86_400_000),
         ("h", 3_600_000),
@@ -103,7 +113,7 @@ fn short_duration(text: &str) -> Option<String> {
         ("s", 1000),
     ]
     .into_iter()
-    .find(|(_, size)| millis != 0 && millis.is_multiple_of(*size));
+    .find(|(_, size)| millis.is_multiple_of(*size));
     Some(match unit {
         Some((name, size)) => format!("{}{name}", millis / size),
         None => format!("{millis}ms"),
@@ -260,10 +270,12 @@ mod tests {
         let whole = effective_user_value(&UserConfig::default());
         assert_eq!(whole["metrics"]["retention"], "7d");
         assert_eq!(whole["startup"]["slot_timeout"], "20s");
+        assert_eq!(whole["lanes"]["throttle_after"], "5m");
+        assert_eq!(whole["lanes"]["freeze_after"], "15m");
         assert_eq!(whole["logs"]["retention"]["max_size"], "5GiB");
         assert_eq!(whole["state"]["max_size"], "512MiB");
         assert_eq!(short_duration("1500ms").as_deref(), Some("1500ms"));
-        assert_eq!(short_duration("0ms").as_deref(), Some("0ms"));
+        assert_eq!(short_duration("0ms").as_deref(), Some("0s"));
         assert_eq!(short_size("5000000000B").as_deref(), Some("5GB"));
         assert_eq!(short_size("dark"), None);
         assert_eq!(short_duration("ams"), None);
@@ -333,6 +345,7 @@ mod tests {
         assert_eq!(applies("start.restore"), Applies::NextCommand);
         assert_eq!(applies("startup.mode"), Applies::Daemon);
         assert_eq!(applies("proxy.https_port"), Applies::Daemon);
+        assert_eq!(applies("lanes.freeze_after"), Applies::Daemon);
         assert_eq!(applies("tuix"), Applies::Daemon);
     }
 }

@@ -19,3 +19,6 @@ devlanes-sys = { path = "../sys" }
 rustix = { version = "1", features = ["fs", "process", "pty", "stdio", "termios"] }
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

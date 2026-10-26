@@ -13,12 +13,14 @@
 
 mod activity;
 mod health;
+mod lane;
 mod listener;
 mod pool;
 mod routes;
 mod server;
 
 pub use health::ListenerHealth;
+pub use lane::LaneActivity;
 pub use listener::{BoundListeners, bind_listeners};
 pub use routes::{HostHeader, Rejected, Route, RouteError, RouteState, RouteTable, Upstream};
 pub use server::{Proxy, ProxyConfig, ProxyLimits, is_loopback};
