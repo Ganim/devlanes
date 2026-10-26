@@ -1884,7 +1884,8 @@ impl InfraProvider for ContainerInfra {
 
     /// `StartedAt` of plain containers and shared/per-lane compose services. The
     /// shared project is resolved and each compose project listed once per call,
-    /// since every `config` and `ps` is a Compose process.
+    /// since every `config` and `ps` is a Compose process. A failed lookup leaves
+    /// out only the containers it covers, as if they did not run.
     async fn containers_started_at(
         &self,
         spec: &InfraSpec,
@@ -1893,8 +1894,10 @@ impl InfraProvider for ContainerInfra {
         let Some(docker) = &self.docker else {
             return Ok(BTreeMap::new());
         };
-        let mut shared_name: Option<String> = None;
-        let mut listed: BTreeMap<String, Vec<devlanes_infra_compose::ContainerStatus>> =
+        // The outer `None` means not looked up yet; an inner `None` a failed lookup,
+        // which is not retried within the call.
+        let mut shared_name: Option<Option<String>> = None;
+        let mut listed: BTreeMap<String, Option<Vec<devlanes_infra_compose::ContainerStatus>>> =
             BTreeMap::new();
         let mut names = Vec::new();
         for container in containers {
@@ -1911,29 +1914,28 @@ impl InfraProvider for ContainerInfra {
                 continue;
             }
             let project = if spec.per_lane.iter().any(|s| s == container) {
-                devlanes_infra_compose::lane_project_name(&spec.project, spec.lane)
-                    .map_err(compose_error)?
-            } else if let Some(name) = &shared_name {
-                name.clone()
+                devlanes_infra_compose::lane_project_name(&spec.project, spec.lane).ok()
             } else {
-                let (project, _) = self
-                    .compose
-                    .shared_project(&Self::shared(spec))
-                    .await
-                    .map_err(compose_error)?;
-                shared_name.insert(project.name.unwrap_or_default()).clone()
+                if shared_name.is_none() {
+                    let resolved = self.compose.shared_project(&Self::shared(spec)).await;
+                    shared_name = Some(
+                        resolved
+                            .ok()
+                            .map(|(project, _)| project.name.unwrap_or_default()),
+                    );
+                }
+                shared_name.clone().flatten()
+            };
+            let Some(project) = project else {
+                continue;
             };
             if !listed.contains_key(&project) {
-                let statuses = self
-                    .compose
-                    .cli()
-                    .ps(&project)
-                    .await
-                    .map_err(compose_error)?;
+                let statuses = self.compose.cli().ps(&project).await.ok();
                 listed.insert(project.clone(), statuses);
             }
             let found = listed
                 .get(&project)
+                .and_then(Option::as_ref)
                 .and_then(|statuses| statuses.iter().find(|s| &s.service == container));
             if let Some(status) = found {
                 names.push((container, status.id.clone()));
