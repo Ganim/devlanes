@@ -62,7 +62,7 @@ Hidden units stay on the box: their ports are not mirrored and the box refuses s
 
 The client runs macOS, Linux or Windows (see [Windows clients](#windows-clients)).
 
-- A `Host` entry in `~/.ssh/config`. devlanes runs the system `ssh`, so `ProxyJump`, certificates, `IdentityFile` and `User` apply. The name you give `remote connect` is that `Host`.
+- A `Host` entry in `~/.ssh/config`. devlanes runs the system `ssh`, so `ProxyJump`, `ProxyCommand`, certificates, `IdentityFile` and `User` apply. The name you give `remote connect` is that `Host`. Boxes on a tailnet or behind Cloudflare Zero Trust have their own pages: [Tailscale](remote-tailscale.md) and [Cloudflare](remote-cloudflare.md).
 - Your key in an agent. The ssh master is a child of the local daemon and uses the agent the daemon was started with; a daemon spawned from your shell inherits that shell's `SSH_AUTH_SOCK`. If the agent socket changes (new login, 1Password restart), `devlanes daemon restart` picks up the new one.
 - `devlanes certs trust`, once. The box's hostnames are served by your local proxy with your local CA.
 - Optionally a different `ports.range` than the box in `~/.devlanes/config.yaml`, so lanes created on both machines before they first connected do not overlap. Overlapping ports are reported, not mirrored, and the local allocator avoids the box's ports from then on.

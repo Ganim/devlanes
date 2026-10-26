@@ -19,6 +19,8 @@ Start with [getting started](getting-started.md). The two references are generat
 - [Service patterns](guides/services.md): APIs behind a frontend, workers, several ports, wildcards, replicas, lifecycle tasks, CI.
 - [Terminals](guides/terminals.md): tab progress bars, clipboard.
 - [Remote setup](guides/remote-setup.md): preparing a box and a client for `devlanes remote connect`.
+- [Remote boxes over Tailscale](guides/remote-tailscale.md): MagicDNS names, OpenSSH keys or Tailscale SSH, check mode, Headscale.
+- [Remote boxes through Cloudflare](guides/remote-cloudflare.md): Cloudflare Tunnel with Access and `cloudflared` as `ProxyCommand`, the Cloudflare One Client, session expiry.
 - [Windows](guides/windows.md): requirements, Git for Windows' shell, stops, ports, HTTPS, hostnames and logon start on Windows 11.
 - [WSL](guides/wsl.md): devlanes inside a WSL distro with the browser on Windows: trusting the CA in Windows, opening URLs, systemd, worktrees on Windows drives.
 
