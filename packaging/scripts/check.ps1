@@ -97,8 +97,10 @@ function Invoke-Child {
     param([string]$Shell, [string]$Command, [hashtable]$Environment)
     $Environment = $Environment.Clone()
     # pwsh's module path would make Windows PowerShell load PowerShell 7 modules;
-    # without the variable it builds its own.
-    if ([IO.Path]::GetFileNameWithoutExtension($Shell) -eq 'powershell') { $Environment.PSModulePath = $null }
+    # without the variable it builds its own. A test that passes one keeps it.
+    if ([IO.Path]::GetFileNameWithoutExtension($Shell) -eq 'powershell' -and -not $Environment.ContainsKey('PSModulePath')) {
+        $Environment.PSModulePath = $null
+    }
     $saved = @{}
     foreach ($name in $Environment.Keys) {
         $saved[$name] = [Environment]::GetEnvironmentVariable($name)
@@ -300,6 +302,17 @@ try {
             Assert-Equal $path.Kind $pathBefore.Kind "$label, user PATH value kind"
         } else {
             Assert-Equal $path.Kind ([Microsoft.Win32.RegistryValueKind]::ExpandString) "$label, new user PATH value kind"
+        }
+
+        # Started from pwsh, or from a shell pwsh started such as Git Bash, Windows
+        # PowerShell inherits pwsh's module path and loads PowerShell 7's
+        # Microsoft.PowerShell.Utility, which has no Get-FileHash there.
+        if ($label -eq 'powershell') {
+            $inherited = $environment.Clone()
+            $inherited.PSModulePath = $env:PSModulePath
+            $run = Invoke-Child $shell "& '$installScript'" $inherited
+            Assert-Equal $run.Code 0 "$label, install.ps1 with pwsh's module path: $($run.Output)"
+            Assert-Equal (Get-FakeVersion $exe) $versions[0] "$label, version installed with pwsh's module path"
         }
 
         # The installed file runs and stays locked while it does, as a daemon would.
