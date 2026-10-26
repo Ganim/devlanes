@@ -1209,21 +1209,32 @@ struct SysPorts;
 impl PortInspector for SysPorts {
     /// Scans listening sockets of all visible processes.
     async fn holder(&self, port: u16) -> Option<u32> {
+        self.holders(port).await.into_iter().next()
+    }
+
+    /// Scans listening sockets of all visible processes, each PID once.
+    async fn holders(&self, port: u16) -> Vec<u32> {
         tokio::task::spawn_blocking(move || {
-            let pids: Vec<u32> = devlanes_sys::processes()
-                .ok()?
-                .iter()
-                .map(|p| p.pid)
-                .collect();
-            devlanes_sys::listening_tcp(&pids)
-                .ok()?
+            let Ok(processes) = devlanes_sys::processes() else {
+                return Vec::new();
+            };
+            let pids: Vec<u32> = processes.iter().map(|p| p.pid).collect();
+            let Ok(sockets) = devlanes_sys::listening_tcp(&pids) else {
+                return Vec::new();
+            };
+            let mut holders: Vec<u32> = Vec::new();
+            for socket in sockets
                 .into_iter()
-                .find(|socket| socket.addr.port() == port)
-                .map(|socket| socket.pid)
+                .filter(|socket| socket.addr.port() == port)
+            {
+                if !holders.contains(&socket.pid) {
+                    holders.push(socket.pid);
+                }
+            }
+            holders
         })
         .await
-        .ok()
-        .flatten()
+        .unwrap_or_default()
     }
 }
 

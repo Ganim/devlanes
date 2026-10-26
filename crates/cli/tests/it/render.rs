@@ -556,7 +556,7 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                     ]},
                     "https": {"bound": true, "port": 443, "fallback_reason": null, "serving": true, "listeners": [
                         {"address": "127.0.0.1:443", "running": true, "accept_errors": 0, "last_error": null},
-                    ]},
+                    ], "shared_with": [{"pid": 5150, "command": "caddy"}]},
                 },
                 "ca": {"present": true, "kind": "devlanes", "path": "/home/u/.devlanes/ca/ca.pem", "trusted": "unknown",
                        "name_constrained": false,

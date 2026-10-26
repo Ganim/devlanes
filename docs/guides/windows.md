@@ -120,7 +120,7 @@ netsh int ipv4 show excludedportrange protocol=tcp
 
 New lane port blocks skip these ranges, so the default `ports.range` works whatever they are. The ranges can change after a reboot or when one of those programs starts, and a lane that got its ports before then cannot bind the ones that are now reserved. `devlanes doctor` warns when that happens to a lane, a proxy port or a port mirrored from a box; `devlanes lane clean` on that lane gives it new ports on its next start.
 
-The proxy needs no privilege for ports 443 and 80, and listens on loopback only. Port 80 is often held by http.sys (PID 4, System; `netsh http show servicestate` lists who registered it); the proxy then falls back to 8080 as it does on Linux, and the fallback message names that command.
+The proxy needs no privilege for ports 443 and 80, and listens on loopback only. Port 80 is often held by http.sys (PID 4, System; `netsh http show servicestate` lists who registered it); the proxy then falls back to 8080 as it does on Linux, and the fallback message names that command. Another reverse proxy listening on the wildcard address does not make it fall back: both run and requests to `localhost` reach devlanes, which `doctor` reports ([next to another reverse proxy](https.md#next-to-another-reverse-proxy)).
 
 With `proxy.lan: true` the proxy listens on every address, and Windows Defender Firewall asks the first time whether `devlanes.exe` may accept connections from the network. Until you allow it, other devices cannot connect. Loopback-only listening, the default, does not prompt.
 

@@ -159,6 +159,66 @@ async fn doctor_names_the_holder_of_a_taken_proxy_port() {
     .expect("timeout");
 }
 
+/// An HTTP listener on its configured port.
+struct OnRequested(u16);
+
+impl RouteSink for OnRequested {
+    fn publish(&self, _: Vec<RouteEntry>) {}
+
+    fn status(&self) -> Value {
+        json!({"http": {"bound": true, "port": self.0, "requested_port": self.0, "fallback_reason": null}})
+    }
+}
+
+/// Names this test process and a PID that no process has as listeners on every port.
+struct SharedWithAnother;
+
+/// Above any PID Windows, Linux or macOS hands out.
+const NO_SUCH_PID: u32 = u32::MAX - 1;
+
+#[async_trait::async_trait]
+impl devlanes_daemon::integrations::PortInspector for SharedWithAnother {
+    async fn holder(&self, _: u16) -> Option<u32> {
+        Some(std::process::id())
+    }
+
+    async fn holders(&self, _: u16) -> Vec<u32> {
+        vec![std::process::id(), NO_SUCH_PID]
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// `doctor` names other processes listening on the port the proxy holds, but not the daemon.
+async fn doctor_names_other_listeners_on_a_proxy_port() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                routes: Some(Arc::new(OnRequested(80))),
+                ports: Some(Arc::new(SharedWithAnother)),
+                ..Setup::default()
+            },
+        )
+        .await;
+        let doctor = h
+            .call(Method::Doctor, json!({}), cx(&main))
+            .await
+            .expect("doctor");
+        let http = &doctor["proxy"]["http"];
+        assert_eq!(
+            http["shared_with"],
+            json!([{"pid": NO_SUCH_PID, "command": null}]),
+            "{doctor}"
+        );
+        assert!(http.get("requested_holder").is_none(), "{doctor}");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 /// A routed host outside the devlanes CA's names keeps its route but is named in
 /// the start result, `doctor` and `config check` with a name under the lane's

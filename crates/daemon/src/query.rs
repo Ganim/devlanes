@@ -114,6 +114,19 @@ fn layer_word(layer: EnvLayer) -> &'static str {
     }
 }
 
+/// The program name of `pid`, read off the executor; `None` when it is gone or hidden.
+async fn process_name(pid: u32) -> Option<String> {
+    tokio::task::spawn_blocking(move || {
+        devlanes_sys::process(pid)
+            .ok()
+            .flatten()
+            .map(|info| info.name)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 impl Inner {
     /// Lanes a read request covers: `all`, the context lane/project, else the cwd's
     /// project, else every project (outside any repo).
@@ -1092,7 +1105,8 @@ impl Inner {
 
     /// The proxy's listener status; a listener that fell back from its
     /// configured port (`requested_port`) names what holds that port now as
-    /// `requested_holder: {pid, command}`.
+    /// `requested_holder: {pid, command}`, and one on its configured port names
+    /// the other processes listening there too as `shared_with: [{pid, command}]`.
     async fn proxy_doctor(&self) -> Value {
         let mut status = self.integ.routes.status();
         for listener in ["http", "https"] {
@@ -1107,22 +1121,29 @@ impl Inner {
                 .get("port")
                 .and_then(Value::as_u64)
                 .and_then(|port| u16::try_from(port).ok());
-            let Some(requested) = requested.filter(|requested| Some(*requested) != bound) else {
+            if let Some(requested) = requested.filter(|requested| Some(*requested) != bound) {
+                if let Some(pid) = self.integ.ports.holder(requested).await {
+                    entry["requested_holder"] =
+                        json!({"pid": pid, "command": process_name(pid).await});
+                }
+                continue;
+            }
+            // Windows lets another program listen on the wildcard address next to
+            // the proxy's loopback listener (or the reverse), so both start and
+            // local connections reach only the proxy.
+            let Some(port) = bound.filter(|_| entry["bound"] == true) else {
                 continue;
             };
-            let Some(pid) = self.integ.ports.holder(requested).await else {
-                continue;
-            };
-            let command = tokio::task::spawn_blocking(move || {
-                devlanes_sys::process(pid)
-                    .ok()
-                    .flatten()
-                    .map(|info| info.name)
-            })
-            .await
-            .ok()
-            .flatten();
-            entry["requested_holder"] = json!({"pid": pid, "command": command});
+            let own = std::process::id();
+            let mut shared = Vec::new();
+            for pid in self.integ.ports.holders(port).await {
+                if pid != own {
+                    shared.push(json!({"pid": pid, "command": process_name(pid).await}));
+                }
+            }
+            if !shared.is_empty() {
+                entry["shared_with"] = Value::Array(shared);
+            }
         }
         status
     }

@@ -753,7 +753,24 @@ fn listener(proxy: &Value, name: &'static str) -> Option<Check> {
                 format!("{name} on fallback port {port}: {}", clean(reason)),
             )
             .fix("free the standard port or set proxy ports in ~/.devlanes/config.yaml"),
-            None => Check::new("proxy", Outcome::Ok, format!("{name} on port {port}")),
+            None => match list(entry, "shared_with").first() {
+                Some(other) => Check::new(
+                    "proxy",
+                    Outcome::Skip,
+                    format!(
+                        "{name} on port {port}, where {} (pid {}) listens too; requests to localhost reach devlanes, not it",
+                        other
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .map_or_else(|| "another process".to_owned(), clean),
+                        display_value(&other["pid"]),
+                    ),
+                )
+                .fix(format!(
+                    "set proxy.{name}_port in ~/.devlanes/config.yaml, or stop the other program"
+                )),
+                None => Check::new("proxy", Outcome::Ok, format!("{name} on port {port}")),
+            },
         });
     }
     if entry.get("reason").and_then(Value::as_str) == Some("no_ca") {

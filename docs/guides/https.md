@@ -112,6 +112,16 @@ A fallback is a `doctor` warning, and public URLs then carry the port: `https://
 
 Windows needs no privilege for the low ports and binds them on loopback. Port 80 there is often held by http.sys, and ports inside the ranges Hyper-V or WSL reserved cannot be bound; both fall back the same way ([Windows](windows.md#ports)).
 
+### Next to another reverse proxy
+
+A local Caddy, nginx or Traefik on 443 and 80 competes with the daemon for those ports. On macOS and Linux whichever starts second cannot bind them: a daemon that starts second falls back to 8443 and 8080, and another proxy that starts second fails to start. On Windows both start, because the other proxy listens on the wildcard address and the daemon on loopback, and requests to `localhost` on those ports reach only the daemon; `doctor` warns when another program listens on a proxy port. To run both, move the daemon to other ports in `~/.devlanes/config.yaml` and run `devlanes daemon restart`:
+
+```yaml
+proxy:
+  https_port: 8443
+  http_port: 8080
+```
+
 ## Access from other devices
 
 `proxy.lan: true` accepts connections from the network. Devices still have to resolve the hostnames to your machine (their own hosts file, or a DNS server pointing `*.test` at your IP with the resolver strategy) and trust the CA. Mirroring a box's lanes to a laptop does not need this; see [remote boxes](../remote.md).

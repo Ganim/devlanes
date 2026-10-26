@@ -542,6 +542,12 @@ impl RouteSink for NoRoutes {
 pub trait PortInspector: Send + Sync {
     /// PID listening on `port`, if any can be identified.
     async fn holder(&self, port: u16) -> Option<u32>;
+
+    /// Every PID listening on `port`. Windows lets a wildcard and a loopback
+    /// listener of different processes share one port.
+    async fn holders(&self, port: u16) -> Vec<u32> {
+        self.holder(port).await.into_iter().collect()
+    }
 }
 
 /// Inspector that never identifies a holder.
