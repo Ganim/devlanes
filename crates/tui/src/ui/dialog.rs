@@ -82,6 +82,7 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("R  S", "restart, stop or start the daemon"),
             ("X", "clean every lane whose worktree is gone"),
+            ("tab", "move j k g G and c between the checks and the log"),
             (
                 "j k  g G",
                 "scroll the log (pauses), oldest, newest and follow",
@@ -92,13 +93,17 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
                 "c",
                 "copy mode: v select, y copy, Y whole entries as in the file",
             ),
+            ("drag", "select text in either box and copy it"),
             ("i", "every check, or problems only"),
         ],
     ),
     (
         "everywhere",
         &[
-            ("tab  shift+tab", "next, previous project"),
+            (
+                "tab  shift+tab",
+                "next, previous project (not on the daemon page)",
+            ),
             ("shift+1-9", "project by number"),
             ("M  D", "monitor, daemon; again or esc returns"),
             ("esc", "one step back, then the menu: options, help, quit"),

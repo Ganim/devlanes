@@ -1,6 +1,7 @@
 //! The daemon page (`D`) as monitor.md draws it: a facts box and a checks
-//! box (problems first, each with its fix), then `daemon.log` parsed into
-//! entries with level colors, folded repeats, filters and follow.
+//! box (problems first, each with its fix, scrolling when they don't fit),
+//! then `daemon.log` parsed into entries with level colors, folded repeats,
+//! filters and follow. Tab moves the scroll and copy keys between the boxes.
 
 use ratatui::{
     Frame,
@@ -11,7 +12,7 @@ use ratatui::{
 };
 
 use super::{draw_box, fit};
-use crate::app::{App, LogCopy};
+use crate::app::{App, DaemonBox, LogCopy};
 use crate::daemonlog::{self, Entry, Level, LogPos, LogView, Shown};
 use crate::doctor::{self, Check, CheckState};
 use crate::text::{self, clean};
@@ -35,11 +36,12 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         area.width
     };
-    let check_rows = check_lines(app, usize::from(checks_width.saturating_sub(2)), usize::MAX).0;
+    let (checks, counts) = check_blocks(app, usize::from(checks_width.saturating_sub(2)));
+    let check_rows: usize = checks.iter().map(|check| check.lines.len()).sum();
     let content = if wide {
-        facts.len().max(check_rows.len())
+        facts.len().max(check_rows)
     } else {
-        facts.len() + check_rows.len()
+        facts.len() + check_rows
     };
     // The boxes take what they need, up to 40% of the page; on short pages
     // up to what leaves the log ten rows. The log gets the rest.
@@ -54,31 +56,112 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         .unwrap_or(5)
         .min(area.height);
     let top_area = Rect::new(area.x, area.y, area.width, top);
-    let room = usize::from(top.saturating_sub(2));
+    let checks_focused = app.daemon.focus == DaemonBox::Checks;
     if wide {
         let facts_area = Rect::new(area.x, area.y, FACTS_WIDTH.min(area.width), top);
         draw_box(app, frame, facts_area, title(" daemon "), Vec::new(), false);
         frame.render_widget(Paragraph::new(facts), inside(facts_area));
         let checks_area = Rect::new(facts_area.right(), area.y, checks_width, top);
-        let (lines, right) = check_lines(app, usize::from(checks_width.saturating_sub(2)), room);
-        draw_box(app, frame, checks_area, title(" checks "), right, false);
-        frame.render_widget(Paragraph::new(lines), inside(checks_area));
+        let rows = inside(checks_area);
+        let left = title(" checks ");
+        let right = checks_title(app, counts, &checks, rows.height, checks_area.width, &left);
+        draw_box(app, frame, checks_area, left, right, checks_focused);
+        app.daemon_checks_box.set(checks_area);
+        render_checks(app, frame, rows, &checks);
     } else {
-        // Facts as two lines above the checks, in one box.
-        let (lines, right) = check_lines(
-            app,
-            usize::from(area.width.saturating_sub(2)),
-            room.saturating_sub(facts.len()),
+        // Facts as two lines above the checks, in one box; only the checks scroll.
+        let inner = inside(top_area);
+        let fixed = u16::try_from(facts.len())
+            .unwrap_or(u16::MAX)
+            .min(inner.height);
+        let rows = Rect::new(inner.x, inner.y + fixed, inner.width, inner.height - fixed);
+        let left = title(" daemon ");
+        let right = checks_title(app, counts, &checks, rows.height, top_area.width, &left);
+        draw_box(app, frame, top_area, left, right, checks_focused);
+        app.daemon_checks_box.set(top_area);
+        frame.render_widget(
+            Paragraph::new(facts),
+            Rect::new(inner.x, inner.y, inner.width, fixed),
         );
-        let mut all = facts;
-        all.extend(lines);
-        draw_box(app, frame, top_area, title(" daemon "), right, false);
-        frame.render_widget(Paragraph::new(all), inside(top_area));
+        render_checks(app, frame, rows, &checks);
     }
     let log = Rect::new(area.x, area.y + top, area.width, area.height - top);
     if log.height >= 3 {
         render_log(app, frame, log);
     }
+}
+
+/// The checks box's rows from its scroll on, with the copy selection, and
+/// where they are drawn for the mouse and the keys.
+fn render_checks(app: &App, frame: &mut Frame, area: Rect, checks: &[CheckBlock]) {
+    let places = check_places(checks);
+    let height = usize::from(area.height);
+    let max_scroll = places.len().saturating_sub(height);
+    app.daemon_checks_view.set(LogView {
+        x: area.x,
+        y: area.y,
+        width: usize::from(area.width),
+        height,
+        max_scroll,
+    });
+    // Checks change on every refresh; a scroll past the new end shows the last rows.
+    let scroll = app.daemon.checks_scroll.min(max_scroll);
+    let places: Vec<LogPos> = places.into_iter().skip(scroll).take(height).collect();
+    let lines: Vec<Line> = places
+        .iter()
+        .filter_map(|place| checks.get(place.entry)?.lines.get(place.line).cloned())
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+    if let Some(copy) = app.daemon.checks_copy {
+        highlight_copy(app, frame, area, &places, copy);
+    }
+}
+
+/// The checks box title's right side in a box `width` columns wide whose
+/// left title is `left`: the copy keys while selecting, else the problem
+/// counts, the rows shown when not all of them fit, and the `i` toggle.
+fn checks_title(
+    app: &App,
+    counts: Vec<Span<'static>>,
+    checks: &[CheckBlock],
+    room: u16,
+    width: u16,
+    left: &[Span<'static>],
+) -> Vec<Span<'static>> {
+    let theme = &app.theme;
+    // Short enough for the checks box beside the facts; the footer lists Y.
+    if app.daemon.checks_copy.is_some() {
+        return vec![Span::styled(" selecting · v mark · y copy ", theme.quiet())];
+    }
+    if counts.is_empty() {
+        return Vec::new();
+    }
+    let total: usize = checks.iter().map(|check| check.lines.len()).sum();
+    let room = usize::from(room);
+    let toggle = if app.daemon.all_checks {
+        "i problems"
+    } else {
+        "i all"
+    };
+    let title = |position: Option<String>| {
+        let mut right = vec![Span::raw(" ")];
+        right.extend(counts.iter().cloned());
+        if let Some(position) = position {
+            right.push(Span::styled(format!(" · {position}"), theme.quiet()));
+        }
+        right.push(Span::styled(format!(" · {toggle} "), theme.quiet()));
+        right
+    };
+    if total <= room || room == 0 {
+        return title(None);
+    }
+    let first = app.daemon.checks_scroll.min(total - room) + 1;
+    let with_rows = title(Some(format!("rows {first}-{}/{total}", first + room - 1)));
+    // draw_box drops a right title that does not fit; the counts matter more
+    // than the rows, so the rows are dropped first.
+    let fits = super::spans_width(left) + super::spans_width(&with_rows) + 2
+        <= usize::from(width).saturating_sub(4);
+    if fits { with_rows } else { title(None) }
 }
 
 fn title(text: &str) -> Vec<Span<'static>> {
@@ -221,10 +304,34 @@ fn fact_lines(app: &App, wide: bool) -> Vec<Line<'static>> {
     lines
 }
 
-/// The checks in `room` rows of `width`: failures, then warnings, each with
-/// its fix, then one `ok` line naming the passing groups (`i` lists them
-/// one per line). Returns the rows and the box title's right side.
-fn check_lines(app: &App, width: usize, room: usize) -> (Vec<Line<'static>>, Vec<Span<'static>>) {
+/// One check in the checks box: its rows as drawn and its words unwrapped,
+/// as `devlanes doctor` prints them, for `Y`.
+#[derive(Debug, Clone)]
+pub struct CheckBlock {
+    pub lines: Vec<Line<'static>>,
+    pub plain: String,
+}
+
+/// The place of every row of `checks`, top to bottom (column 0).
+pub(crate) fn check_places(checks: &[CheckBlock]) -> Vec<LogPos> {
+    checks
+        .iter()
+        .enumerate()
+        .flat_map(|(entry, check)| {
+            (0..check.lines.len()).map(move |line| LogPos {
+                entry,
+                line,
+                column: 0,
+            })
+        })
+        .collect()
+}
+
+/// The checks as blocks of rows of `width`: failures, then warnings, each
+/// with its detail and fix, then one `ok` line naming the passing groups (`i`
+/// lists them one per line). Returns the blocks and the problem counts for
+/// the box title, both empty before the first doctor answer.
+pub(crate) fn check_blocks(app: &App, width: usize) -> (Vec<CheckBlock>, Vec<Span<'static>>) {
     let theme = &app.theme;
     let Some(doctor) = app.daemon.doctor.as_ref() else {
         return (Vec::new(), Vec::new());
@@ -236,7 +343,8 @@ fn check_lines(app: &App, width: usize, room: usize) -> (Vec<Line<'static>>, Vec
         checks.push(Check {
             group: "update",
             state: CheckState::Warn,
-            text: format!("{text} · u hides it"),
+            text: text.to_owned(),
+            detail: None,
             fix: (!command.is_empty()).then(|| command.to_owned()),
         });
     }
@@ -288,8 +396,7 @@ fn check_lines(app: &App, width: usize, room: usize) -> (Vec<Line<'static>>, Vec
             })
             .collect()
     };
-    // Each check as a block of rows, so a cut never splits one.
-    let mut blocks: Vec<Vec<Line>> = Vec::new();
+    let mut blocks: Vec<CheckBlock> = Vec::new();
     let mut passing = Vec::new();
     for check in &checks {
         if check.state == CheckState::Ok && !app.daemon.all_checks {
@@ -298,34 +405,45 @@ fn check_lines(app: &App, width: usize, room: usize) -> (Vec<Line<'static>>, Vec
             }
             continue;
         }
-        let mut block = row(check, &check.text, true);
-        if let Some(fix) = &check.fix {
-            block.extend(row(check, &format!("fix: {fix}"), false));
+        // The key that hides the notice is for this page; `Y` copies the words without it.
+        let drawn = if check.group == "update" {
+            format!("{} · u hides it", check.text)
+        } else {
+            check.text.clone()
+        };
+        let mut lines = row(check, &drawn, true);
+        let mut plain = vec![format!(
+            "{} {}: {}",
+            check.state.word(),
+            check.group,
+            check.text
+        )];
+        if let Some(detail) = &check.detail {
+            lines.extend(row(check, detail, false));
+            plain.push(format!("  {detail}"));
         }
-        blocks.push(block);
+        if let Some(fix) = &check.fix {
+            lines.extend(row(check, &format!("fix: {fix}"), false));
+            plain.push(format!("  fix: {fix}"));
+        }
+        blocks.push(CheckBlock {
+            lines,
+            plain: plain.join("\n"),
+        });
     }
     if !passing.is_empty() {
         let ok = Check {
             group: "",
             state: CheckState::Ok,
             text: String::new(),
+            detail: None,
             fix: None,
         };
-        blocks.push(row(&ok, &passing.join(" · "), true));
-    }
-    let mut lines = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
-        let left = blocks.len() - index;
-        // Leave a row for `… n more` unless this is the last block.
-        let reserve = usize::from(left > 1);
-        if lines.len() + block.len() + reserve > room {
-            lines.push(Line::styled(
-                format!("… {left} more · i shows all"),
-                theme.quiet(),
-            ));
-            break;
-        }
-        lines.extend(block.iter().cloned());
+        let passing = passing.join(" · ");
+        blocks.push(CheckBlock {
+            lines: row(&ok, &passing, true),
+            plain: format!("ok {passing}"),
+        });
     }
     let mut parts = Vec::new();
     if fails > 0 {
@@ -346,20 +464,14 @@ fn check_lines(app: &App, width: usize, room: usize) -> (Vec<Line<'static>>, Vec
     if parts.is_empty() {
         parts.push(Span::styled("all ok", theme.tone(Tone::Ok)));
     }
-    let toggle = if app.daemon.all_checks {
-        "i problems"
-    } else {
-        "i all"
-    };
-    let mut right = vec![Span::raw(" ")];
+    let mut counts = Vec::new();
     for (index, part) in parts.into_iter().enumerate() {
         if index > 0 {
-            right.push(Span::styled(" · ", theme.quiet()));
+            counts.push(Span::styled(" · ", theme.quiet()));
         }
-        right.push(part);
+        counts.push(part);
     }
-    right.push(Span::styled(format!(" · {toggle} "), theme.quiet()));
-    (lines, right)
+    (blocks, counts)
 }
 
 /// The palette color of the unit `lane:unit` names, when the TUI knows it.
@@ -663,7 +775,8 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
         state.remove(least);
     }
     let right = vec![Span::styled(format!(" {} ", joined(&state)), theme.quiet())];
-    draw_box(app, frame, area, title(" daemon.log "), right, false);
+    let focused = app.daemon.focus == DaemonBox::Log;
+    draw_box(app, frame, area, title(" daemon.log "), right, focused);
 
     if let Some(error) = &view.log_error {
         let lines: Vec<Line> = text::wrap(&format!("Can't read daemon.log: {error}"), width)

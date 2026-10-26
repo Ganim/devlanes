@@ -973,6 +973,15 @@ fn hints(app: &App) -> Vec<Hint> {
                 ("esc", "cancel", KeyCode::Esc),
             ];
         }
+        View::Daemon if app.daemon.checks_copy.is_some() => {
+            return vec![
+                ("h j k l", "move", KeyCode::Null),
+                ("v", "mark", ch('v')),
+                ("y", "copy", ch('y')),
+                ("Y", "copy whole checks", ch('Y')),
+                ("esc", "cancel", KeyCode::Esc),
+            ];
+        }
         View::Daemon if app.daemon.filter_editing => {
             return vec![
                 ("type", "to filter", KeyCode::Null),
@@ -991,6 +1000,10 @@ fn hints(app: &App) -> Vec<Hint> {
             } else {
                 ("d", "unfold", ch('d'))
             };
+            let tab = match app.daemon.focus {
+                crate::app::DaemonBox::Log => ("tab", "to checks", KeyCode::Tab),
+                crate::app::DaemonBox::Checks => ("tab", "to log", KeyCode::Tab),
+            };
             let mut hints = vec![
                 ("j k", "scroll", ch('k')),
                 follow,
@@ -1000,6 +1013,7 @@ fn hints(app: &App) -> Vec<Hint> {
                 ("c", "copy", ch('c')),
                 ("i", "checks", ch('i')),
                 fold,
+                tab,
                 ("R", "restart", ch('R')),
                 ("S", "stop", ch('S')),
             ];

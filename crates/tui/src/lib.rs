@@ -7,6 +7,7 @@
 pub mod api;
 pub mod app;
 pub mod banner;
+pub mod blockcopy;
 pub mod daemonlog;
 pub mod doctor;
 pub mod graph;

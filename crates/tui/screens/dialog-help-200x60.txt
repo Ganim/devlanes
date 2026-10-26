@@ -41,23 +41,23 @@
 │   ✓ migrate             done · runs at start ││      │ daemon (D)                                                                             │                                                      │
 │   ✓ seed                                done ││      │   R  S              restart, stop or start the daemon                                  │                                                      │
 │   · lint                             not run ││      │   X                 clean every lane whose worktree is gone                            │                                                      │
-│   · typecheck                        not run ││      │   j k  g G          scroll the log (pauses), oldest, newest and follow                 │                                                      │
-│   · test-e2e                         not run ││      │   w  /  T           level floor, text filter, targets                                  │                                                      │
-│   ✓ codegen                             done ││      │   F  d              pause or follow, fold or unfold repeats                            │                                                      │
-│   · clean-cache                      not run ││      │   c                 copy mode: v select, y copy, Y whole entries as in the file        │                                                      │
-│                                              ││      │   i                 every check, or problems only                                      │                                                      │
-│ ▾ infra                                      ││      │                                                                                        │                                                      │
-│   ▾ containers                          2 up ││      │ everywhere                                                                             │                                                      │
-│     ● localstack                             ││      │   tab  shift+tab    next, previous project                                             │                                                      │
-│     ● rabbitmq                               ││      │   shift+1-9         project by number                                                  │                                                      │
-│   ▾ shared                              3 up ││      │   M  D              monitor, daemon; again or esc returns                              │                                                      │
-│     ● pgbouncer                              ││      │   esc               one step back, then the menu: options, help, quit                  │                                                      │
-│     ● postgres                               ││      │   u                 hide the version notice                                            │                                                      │
-│     ● redis                                  ││      │   q                 quit; asks first while lanes run (tui.on_quit)                     │                                                      │
-│   ▸ setup                             4 done ││      │                                                                                        │                                                      │
-│                                              ││      │ any key closes                                                                         │                                                      │
-└──────────────────────────────────────────────┘└──────└────────────────────────────────────────────────────────────────────────────────────────┘──────────────────────────────────────────────────────┘
- r restart   n next problem   pgup scroll back   c select text   / filter                                                                                                         ? all keys   q quit
+│   · typecheck                        not run ││      │   tab               move j k g G and c between the checks and the log                  │                                                      │
+│   · test-e2e                         not run ││      │   j k  g G          scroll the log (pauses), oldest, newest and follow                 │                                                      │
+│   ✓ codegen                             done ││      │   w  /  T           level floor, text filter, targets                                  │                                                      │
+│   · clean-cache                      not run ││      │   F  d              pause or follow, fold or unfold repeats                            │                                                      │
+│                                              ││      │   c                 copy mode: v select, y copy, Y whole entries as in the file        │                                                      │
+│ ▾ infra                                      ││      │   drag              select text in either box and copy it                              │                                                      │
+│   ▾ containers                          2 up ││      │   i                 every check, or problems only                                      │                                                      │
+│     ● localstack                             ││      │                                                                                        │                                                      │
+│     ● rabbitmq                               ││      │ everywhere                                                                             │                                                      │
+│   ▾ shared                              3 up ││      │   tab  shift+tab    next, previous project (not on the daemon page)                    │                                                      │
+│     ● pgbouncer                              ││      │   shift+1-9         project by number                                                  │                                                      │
+│     ● postgres                               ││      │   M  D              monitor, daemon; again or esc returns                              │                                                      │
+│     ● redis                                  ││      │   esc               one step back, then the menu: options, help, quit                  │                                                      │
+│   ▸ setup                             4 done ││      │   u                 hide the version notice                                            │                                                      │
+│                                              ││      │   q                 quit; asks first while lanes run (tui.on_quit)                     │                                                      │
+└──────────────────────────────────────────────┘└──────│ any key closes                                                                         │──────────────────────────────────────────────────────┘
+ r restart   n next problem   pgup scroll back   c sele└────────────────────────────────────────────────────────────────────────────────────────┘                                 ? all keys   q quit
 
 --- styles (row: columns style) ---
 0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 55-144 bold, 179 bold, 180-187 dim, 191 bold, 192-198 dim
@@ -108,15 +108,15 @@
 45: 0 darkgray, 4-5 green, 42-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 46: 0 darkgray, 4-16 dim, 39-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 47: 0 darkgray, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
-48: 0 darkgray, 2-3 dim, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
-49: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 55 bold, 57-66 dim, 144 bold, 199 darkgray
-50: 0 darkgray, 6-17 green, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
-51: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+48: 0 darkgray, 2-3 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+49: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+50: 0 darkgray, 6-17 green, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
+51: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 55 bold, 57-66 dim, 144 bold, 199 darkgray
 52: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 53: 0 darkgray, 6-7 green, 8-16 dim magenta, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 54: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 55: 0 darkgray, 6-7 green, 8-12 cyan, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
-56: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
-57: 0 darkgray, 47-48 darkgray, 55 bold, 57-70 dim, 144 bold, 199 darkgray
-58: 0-54 darkgray, 55-144 bold, 145-199 darkgray
-59: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-64 dim, 65 bold, 66-75 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim
+56: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+57: 0 darkgray, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+58: 0-54 darkgray, 55 bold, 57-70 dim, 144 bold, 145-199 darkgray
+59: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-54 dim, 55-144 bold, 178 bold, 179-190 dim, 191 bold, 192-199 dim

@@ -31,6 +31,8 @@ pub struct Check {
     pub group: &'static str,
     pub state: CheckState,
     pub text: String,
+    /// A second line under the text, such as the units a check names.
+    pub detail: Option<String>,
     pub fix: Option<String>,
 }
 
@@ -70,6 +72,7 @@ pub fn checks(data: &Value) -> Vec<Check> {
                 devlanes_cli::DoctorState::Fail => CheckState::Fail,
             },
             text: clean(&check.text),
+            detail: check.detail.map(|detail| clean(&detail)),
             fix: check.fix.map(|fix| clean(&fix)),
         })
         .collect()
@@ -168,8 +171,12 @@ mod tests {
             Some(CheckState::Warn)
         );
         assert_eq!(
-            state("1 unit with a stop timeout longer than"),
+            state("1 unit can take too long to stop"),
             Some(CheckState::Warn)
+        );
+        assert_eq!(
+            find(&checks, "1 unit can take too long to stop").and_then(|c| c.detail.as_deref()),
+            Some("unit: acme:worker (60s)")
         );
         assert!(!checks.iter().any(|c| c.group == "output"));
     }

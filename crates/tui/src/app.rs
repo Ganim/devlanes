@@ -155,6 +155,15 @@ pub struct DaemonView {
     pub copy: Option<LogCopy>,
     /// Where a left button press in the log was, until its release.
     press: Option<crate::daemonlog::LogPos>,
+    /// The box that scroll and copy keys act on; Tab switches it.
+    pub focus: DaemonBox,
+    /// Rows of the checks box scrolled off its top.
+    pub checks_scroll: usize,
+    /// Copy mode on the checks box, over its checks. At most one of this and
+    /// `copy` is set.
+    pub checks_copy: Option<LogCopy>,
+    /// Where a left button press in the checks box was, until its release.
+    checks_press: Option<crate::daemonlog::LogPos>,
     /// The restart, stop, start or gc in flight.
     pub busy: Option<&'static str>,
     /// Set after this TUI stopped the daemon, until one is reachable again.
@@ -166,9 +175,17 @@ pub struct DaemonView {
     background: u8,
 }
 
+/// A box of the daemon page that takes the scroll and copy keys.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DaemonBox {
+    Checks,
+    #[default]
+    Log,
+}
+
 /// The cursor and selection of copy mode on the daemon log, a cell of the
 /// log as drawn, like copy mode in a unit's pane. Entries index the shown
-/// entries (0 is the oldest).
+/// entries (0 is the oldest); in the checks box they index the checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogCopy {
     pub cursor: crate::daemonlog::LogPos,
@@ -760,6 +777,12 @@ pub struct App {
     pub monitor_table_rows: std::cell::Cell<usize>,
     /// Rows the daemon log box showed in the last frame, as drawn.
     pub daemon_log_view: std::cell::Cell<crate::daemonlog::LogView>,
+    /// The checks box's rows in the last frame, without the facts above them
+    /// below 100 columns; `max_scroll` counts rows, not checks.
+    pub daemon_checks_view: std::cell::Cell<crate::daemonlog::LogView>,
+    /// The whole box the checks are drawn in, borders and facts included,
+    /// where the wheel and a press go to the checks.
+    pub daemon_checks_box: std::cell::Cell<ratatui::layout::Rect>,
     pub list_offset: usize,
     pub notice: Option<Notice>,
     /// Recent errors, newest first.
@@ -856,6 +879,8 @@ impl App {
             monitor_seconds: std::cell::Cell::new(0),
             monitor_table_rows: std::cell::Cell::new(0),
             daemon_log_view: std::cell::Cell::default(),
+            daemon_checks_view: std::cell::Cell::default(),
+            daemon_checks_box: std::cell::Cell::default(),
             list_offset: 0,
             notice: None,
             errors: VecDeque::new(),
@@ -1469,7 +1494,9 @@ impl App {
                         {
                             facts.insert("service".into(), service.clone());
                         }
+                        let before = self.daemon_check_blocks();
                         self.daemon.doctor = Some(doctor);
+                        self.checks_refreshed(&before);
                     }
                     Err(error) => failure = failure.or(Some(("doctor checks", error))),
                 }
@@ -2779,6 +2806,10 @@ impl App {
             self.daemon_copy_key(key, page, effects);
             return;
         }
+        if self.view == View::Daemon && self.daemon.checks_copy.is_some() {
+            self.checks_copy_key(key, effects);
+            return;
+        }
         if self.view == View::Daemon && self.daemon.filter_editing {
             self.daemon_filter_key(key, effects);
             return;
@@ -2797,6 +2828,15 @@ impl App {
             return;
         }
         if self.view == View::Monitor && key.code == KeyCode::Esc && self.monitor_back() {
+            return;
+        }
+        // The daemon page shows nothing of the selected project, so Tab moves
+        // between its boxes there instead of switching projects.
+        if self.view == View::Daemon && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            self.daemon.focus = match self.daemon.focus {
+                DaemonBox::Checks => DaemonBox::Log,
+                DaemonBox::Log => DaemonBox::Checks,
+            };
             return;
         }
         if let Some(attached) = self.attached.as_mut()
@@ -2936,6 +2976,9 @@ impl App {
                 view.paused = true;
             }
         };
+        if self.daemon.focus == DaemonBox::Checks && self.checks_key(key) {
+            return;
+        }
         match key.code {
             // On the bottom line of the box, like copy mode in a unit's pane.
             KeyCode::Char('c') if !ctrl && shown > 0 => {
@@ -2967,7 +3010,10 @@ impl App {
                 self.daemon_filters_changed();
             }
             KeyCode::Char('/') => self.daemon.filter_editing = true,
-            KeyCode::Char('i') => self.daemon.all_checks = !self.daemon.all_checks,
+            KeyCode::Char('i') => {
+                self.daemon.all_checks = !self.daemon.all_checks;
+                self.daemon.checks_scroll = 0;
+            }
             KeyCode::Char('T') => {
                 let (entries, _) = self.daemon_shown();
                 let items: Vec<(String, usize, bool)> = crate::daemonlog::targets(&entries)
@@ -3279,145 +3325,202 @@ impl App {
     /// move a cell cursor, `v` marks, `y` copies the text as shown, `Y` the
     /// whole entries it touches as they are in the file, Esc leaves.
     fn daemon_copy_key(&mut self, key: KeyEvent, page: usize, effects: &mut Vec<Effect>) {
-        use crate::daemonlog::LogPos;
-        let (entries, shown) = self.daemon_shown();
-        let Some(mut copy) = self.daemon.copy else {
+        use crate::blockcopy::{Blocks, Outcome};
+        let Some(copy) = self.daemon.copy else {
             return;
         };
+        let (entries, shown) = self.daemon_shown();
         let layout = self.daemon_log_layout(shown.len());
-        let width = layout.width;
-        let lines = |index: usize| -> Vec<ratatui::text::Line<'static>> {
-            crate::ui::daemon::entry_lines(self, &entries, &shown, index, width)
+        let lines = |index: usize| {
+            crate::ui::daemon::entry_lines(self, &entries, &shown, index, layout.width)
         };
-        // One drawn line down or up, across entries; `None` at either end.
-        let down = |pos: LogPos| -> Option<LogPos> {
-            if pos.line + 1 < lines(pos.entry).len() {
-                Some(LogPos {
-                    line: pos.line + 1,
-                    ..pos
-                })
-            } else {
-                (pos.entry + 1 < shown.len()).then_some(LogPos {
-                    entry: pos.entry + 1,
-                    line: 0,
-                    ..pos
-                })
-            }
+        let blocks = Blocks {
+            count: shown.len(),
+            lines: &lines,
+            width: layout.width,
         };
-        let up = |pos: LogPos| -> Option<LogPos> {
-            if pos.line > 0 {
-                return Some(LogPos {
-                    line: pos.line - 1,
-                    ..pos
-                });
+        match blocks.key(copy, key, page) {
+            Outcome::Moved(copy) => {
+                self.daemon.copy = Some(copy);
+                self.daemon.scroll = self.daemon_reveal(copy.cursor, &entries, &shown, layout);
             }
-            let entry = pos.entry.checked_sub(1)?;
-            Some(LogPos {
-                entry,
-                line: lines(entry).len().saturating_sub(1),
-                ..pos
-            })
-        };
-        let step = |pos: LogPos, times: usize, by: &dyn Fn(LogPos) -> Option<LogPos>| {
-            (0..times).try_fold(pos, |at, _| by(at)).unwrap_or_else(|| {
-                // Past an end: stop on the last line there is.
-                let mut at = pos;
-                while let Some(next) = by(at) {
-                    at = next;
-                }
-                at
-            })
-        };
-        let last_column = width.saturating_sub(1);
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => copy.cursor = step(copy.cursor, 1, &down),
-            KeyCode::Char('k') | KeyCode::Up => copy.cursor = step(copy.cursor, 1, &up),
-            KeyCode::PageDown => copy.cursor = step(copy.cursor, page, &down),
-            KeyCode::PageUp => copy.cursor = step(copy.cursor, page, &up),
-            KeyCode::Char('h') | KeyCode::Left => {
-                copy.cursor.column = copy.cursor.column.saturating_sub(1);
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                copy.cursor.column = (copy.cursor.column + 1).min(last_column);
-            }
-            KeyCode::Char('0') | KeyCode::Home => copy.cursor.column = 0,
-            KeyCode::Char('$') | KeyCode::End => copy.cursor.column = last_column,
-            KeyCode::Char('g') => {
-                copy.cursor = LogPos {
-                    column: copy.cursor.column,
-                    ..LogPos::default()
-                };
-            }
-            KeyCode::Char('G') => {
-                let entry = shown.len().saturating_sub(1);
-                copy.cursor = LogPos {
-                    entry,
-                    line: lines(entry).len().saturating_sub(1),
-                    column: copy.cursor.column,
-                };
-            }
-            KeyCode::Char('v') | KeyCode::Char(' ') => {
-                copy.anchor = match copy.anchor {
-                    Some(_) => None,
-                    None => Some(copy.cursor),
-                };
-            }
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
-                let (first, last) = copy.copied();
-                let mut text: Vec<String> = Vec::new();
-                if key.code == KeyCode::Char('Y') {
-                    for row in shown.get(first.entry..=last.entry).unwrap_or_default() {
-                        if let Some(entry) = entries.get(row.entry) {
-                            text.extend(entry.raw.iter().map(|line| text::clean(line)));
-                        }
-                    }
-                } else {
-                    for index in first.entry..=last.entry.min(shown.len().saturating_sub(1)) {
-                        for (line, drawn) in lines(index).iter().enumerate() {
-                            let start = LogPos {
-                                entry: index,
-                                line,
-                                column: 0,
-                            };
-                            let end = LogPos {
-                                column: usize::MAX,
-                                ..start
-                            };
-                            if end < first || start > last {
-                                continue;
-                            }
-                            let from = if start < first { first.column } else { 0 };
-                            let to = if (LogPos { column: 0, ..last }) == start {
-                                last.column
-                            } else {
-                                usize::MAX
-                            };
-                            let plain = crate::ui::daemon::plain(drawn);
-                            let part: String = plain
-                                .chars()
-                                .skip(from)
-                                .take(to.saturating_sub(from).saturating_add(1))
-                                .collect();
-                            text.push(part.trim_end().to_owned());
-                        }
-                    }
-                }
+            Outcome::Copy(text) => {
                 self.daemon.copy = None;
-                let text = text.join("\n");
-                if !text.trim().is_empty() {
-                    effects.push(Effect::Copy(text));
-                    self.set_notice("copied (OSC 52; some terminals block it)".into());
-                }
-                return;
+                self.copy_selection(text, effects);
             }
-            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => {
+            Outcome::Whole(first, last) => {
+                let text: Vec<String> = shown
+                    .get(first..=last)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|row| entries.get(row.entry))
+                    .flat_map(|entry| entry.raw.iter().map(|line| text::clean(line)))
+                    .collect();
                 self.daemon.copy = None;
-                return;
+                self.copy_selection(text.join("\n"), effects);
             }
-            _ => {}
+            Outcome::Leave => self.daemon.copy = None,
         }
-        self.daemon.copy = Some(copy);
-        self.daemon.scroll = self.daemon_reveal(copy.cursor, &entries, &shown, layout);
+    }
+
+    /// Copies text the daemon page selected; an empty selection copies nothing.
+    fn copy_selection(&mut self, text: String, effects: &mut Vec<Effect>) {
+        if !text.trim().is_empty() {
+            effects.push(Effect::Copy(text));
+            self.set_notice("copied (OSC 52; some terminals block it)".into());
+        }
+    }
+
+    /// The checks box as the last frame drew it; before the first frame, the
+    /// body's width and no rows, so nothing scrolls.
+    fn daemon_checks_layout(&self) -> crate::daemonlog::LogView {
+        let view = self.daemon_checks_view.get();
+        if view.width > 0 {
+            return view;
+        }
+        crate::daemonlog::LogView {
+            width: usize::from(self.size.0.saturating_sub(2)).max(1),
+            ..crate::daemonlog::LogView::default()
+        }
+    }
+
+    /// The checks box's blocks at the width the last frame drew them.
+    pub fn daemon_check_blocks(&self) -> Vec<crate::ui::daemon::CheckBlock> {
+        crate::ui::daemon::check_blocks(self, self.daemon_checks_layout().width).0
+    }
+
+    /// The places of the checks box's rows on screen, top to bottom.
+    fn checks_visible(
+        &self,
+        checks: &[crate::ui::daemon::CheckBlock],
+    ) -> Vec<crate::daemonlog::LogPos> {
+        let view = self.daemon_checks_layout();
+        crate::ui::daemon::check_places(checks)
+            .into_iter()
+            .skip(self.daemon.checks_scroll.min(view.max_scroll))
+            .take(view.height)
+            .collect()
+    }
+
+    /// Keys while the checks box has focus: `j k`, PageUp, PageDown and
+    /// `g G` scroll it by a row, a page or to an end, and `c` starts copy mode
+    /// on its top row. False for every other key, which stays the page's.
+    fn checks_key(&mut self, key: KeyEvent) -> bool {
+        let view = self.daemon_checks_layout();
+        let max = view.max_scroll;
+        let scroll = self.daemon.checks_scroll.min(max);
+        let page = view.height.max(1);
+        self.daemon.checks_scroll = match key.code {
+            KeyCode::Char('k') | KeyCode::Up => scroll.saturating_sub(1),
+            KeyCode::Char('j') | KeyCode::Down => (scroll + 1).min(max),
+            KeyCode::PageUp => scroll.saturating_sub(page),
+            KeyCode::PageDown => (scroll + page).min(max),
+            KeyCode::Home | KeyCode::Char('g') => 0,
+            KeyCode::End | KeyCode::Char('G') => max,
+            KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.daemon.checks_scroll = scroll;
+                let checks = self.daemon_check_blocks();
+                if let Some(top) = self.checks_visible(&checks).first().copied() {
+                    self.daemon.checks_copy = Some(LogCopy {
+                        cursor: top,
+                        anchor: None,
+                    });
+                }
+                return true;
+            }
+            _ => return false,
+        };
+        true
+    }
+
+    /// Keys in copy mode on the checks box: the log's copy keys, where `Y`
+    /// copies whole checks unwrapped, as `devlanes doctor` prints them.
+    fn checks_copy_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
+        use crate::blockcopy::{Blocks, Outcome};
+        let Some(copy) = self.daemon.checks_copy else {
+            return;
+        };
+        let view = self.daemon_checks_layout();
+        let checks = self.daemon_check_blocks();
+        let lines = |index: usize| {
+            checks
+                .get(index)
+                .map(|check| check.lines.clone())
+                .unwrap_or_default()
+        };
+        let blocks = Blocks {
+            count: checks.len(),
+            lines: &lines,
+            width: view.width,
+        };
+        match blocks.key(copy, key, view.height.max(1)) {
+            Outcome::Moved(copy) => {
+                self.daemon.checks_copy = Some(copy);
+                self.daemon.checks_scroll = self.checks_reveal(copy.cursor, &checks, view);
+            }
+            Outcome::Copy(text) => {
+                self.daemon.checks_copy = None;
+                self.copy_selection(text, effects);
+            }
+            Outcome::Whole(first, last) => {
+                let text: Vec<&str> = checks
+                    .get(first..=last)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|check| check.plain.as_str())
+                    .collect();
+                self.daemon.checks_copy = None;
+                self.copy_selection(text.join("\n"), effects);
+            }
+            Outcome::Leave => self.daemon.checks_copy = None,
+        }
+    }
+
+    /// After a doctor refresh: other checks end copy mode and a press on the
+    /// checks box, whose places would now point at other text, as a rotated
+    /// log ends copy mode on the log. The scroll is kept within the new rows.
+    fn checks_refreshed(&mut self, before: &[crate::ui::daemon::CheckBlock]) {
+        let after = self.daemon_check_blocks();
+        let changed = before.len() != after.len()
+            || before
+                .iter()
+                .zip(&after)
+                .any(|(old, new)| old.plain != new.plain);
+        if changed {
+            self.daemon.checks_copy = None;
+            self.daemon.checks_press = None;
+        }
+        // Before the first frame the box has no rows, and nothing scrolls yet.
+        let height = self.daemon_checks_view.get().height;
+        if height > 0 {
+            let rows: usize = after.iter().map(|check| check.lines.len()).sum();
+            self.daemon.checks_scroll = self.daemon.checks_scroll.min(rows.saturating_sub(height));
+        }
+    }
+
+    /// The least change to the checks box's scroll that brings `cursor`'s row
+    /// into view. The box reads top down, unlike the log, so rows count from
+    /// its top.
+    fn checks_reveal(
+        &self,
+        cursor: crate::daemonlog::LogPos,
+        checks: &[crate::ui::daemon::CheckBlock],
+        view: crate::daemonlog::LogView,
+    ) -> usize {
+        let row = checks
+            .iter()
+            .take(cursor.entry)
+            .map(|check| check.lines.len())
+            .sum::<usize>()
+            + cursor.line;
+        let scroll = self.daemon.checks_scroll.min(view.max_scroll);
+        if row < scroll {
+            row
+        } else if row >= scroll + view.height {
+            (row + 1 - view.height.max(1)).min(view.max_scroll)
+        } else {
+            scroll
+        }
     }
 
     /// The least scroll that brings `cursor`'s line into view. The box is
@@ -4565,12 +4668,61 @@ impl App {
         }
     }
 
-    /// The daemon tab: the wheel scrolls the log, a drag over it selects
-    /// text as copy mode does and the release copies it.
+    /// The daemon tab: the wheel scrolls the checks box under the pointer and
+    /// the log anywhere else. A press focuses the box it lands in; a drag
+    /// there selects text as copy mode does and the release copies it.
     fn daemon_mouse(&mut self, mouse: MouseEvent, effects: &mut Vec<Effect>) {
+        let checks = self.daemon_checks_view.get();
+        let over_checks = self
+            .daemon_checks_box
+            .get()
+            .contains((mouse.column, mouse.row).into());
         let shown = self.daemon_shown().1.len();
         let max = self.daemon_log_layout(shown).max_scroll;
         match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if over_checks => {
+                let scroll = self.daemon.checks_scroll.min(checks.max_scroll);
+                self.daemon.checks_scroll = if mouse.kind == MouseEventKind::ScrollUp {
+                    scroll.saturating_sub(3)
+                } else {
+                    (scroll + 3).min(checks.max_scroll)
+                };
+            }
+            MouseEventKind::Down(MouseButton::Left) if over_checks => {
+                self.daemon.focus = DaemonBox::Checks;
+                // The cells are mapped through the rows as drawn, which use the clamped scroll.
+                self.daemon.checks_scroll = self.daemon.checks_scroll.min(checks.max_scroll);
+                // A release lost outside the window would leave the log's press
+                // to take over the next drag; copy mode follows the focus.
+                self.daemon.press = None;
+                self.daemon.copy = None;
+                self.daemon.checks_press = self.checks_cell(mouse.column, mouse.row, false);
+                if self.daemon.checks_press.is_some() {
+                    self.daemon.checks_copy = None;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.daemon.checks_press.is_some() => {
+                if let Some(anchor) = self.daemon.checks_press
+                    && let Some(cursor) = self.checks_cell(mouse.column, mouse.row, true)
+                {
+                    self.daemon.checks_copy = Some(LogCopy {
+                        cursor,
+                        anchor: Some(anchor),
+                    });
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.daemon.checks_press.is_some() => {
+                let press = self.daemon.checks_press.take();
+                let dragged = self.daemon.checks_copy.is_some_and(|copy| {
+                    copy.anchor.is_some()
+                        && copy.anchor == press
+                        && copy.anchor != Some(copy.cursor)
+                });
+                if dragged {
+                    let copy = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+                    self.checks_copy_key(copy, effects);
+                }
+            }
             MouseEventKind::ScrollUp => {
                 self.daemon.scroll = (self.daemon.scroll + 3).min(max);
                 if self.daemon.scroll > 0 {
@@ -4583,9 +4735,14 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 // The cells are mapped through the lines as drawn, which use the clamped scroll.
                 self.daemon.scroll = self.daemon.scroll.min(max);
+                if crate::blockcopy::contains(self.daemon_log_view.get(), mouse.column, mouse.row) {
+                    self.daemon.focus = DaemonBox::Log;
+                }
+                self.daemon.checks_press = None;
                 self.daemon.press = self.daemon_cell(mouse.column, mouse.row, false);
                 if self.daemon.press.is_some() {
                     self.daemon.copy = None;
+                    self.daemon.checks_copy = None;
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -4625,21 +4782,18 @@ impl App {
         if view.height == 0 {
             return None;
         }
-        let visible = self.daemon_visible();
-        let last = visible.len().checked_sub(1)?;
-        let dy = i32::from(row) - i32::from(view.y);
-        let dx = i32::from(column) - i32::from(view.x);
-        let line = usize::try_from(dy).ok().filter(|line| *line <= last);
-        let cell = usize::try_from(dx).ok().filter(|cell| *cell < view.width);
-        if !clamp && (line.is_none() || cell.is_none()) {
+        crate::blockcopy::cell(view, &self.daemon_visible(), column, row, clamp)
+    }
+
+    /// The checks box cell at screen `(column, row)`, as [`App::daemon_cell`]
+    /// finds one in the log.
+    fn checks_cell(&self, column: u16, row: u16, clamp: bool) -> Option<crate::daemonlog::LogPos> {
+        let view = self.daemon_checks_view.get();
+        if view.height == 0 {
             return None;
         }
-        let line = line.unwrap_or(if dy < 0 { 0 } else { last });
-        let cell = cell.unwrap_or(if dx < 0 { 0 } else { view.width - 1 });
-        Some(crate::daemonlog::LogPos {
-            column: cell,
-            ..visible[line]
-        })
+        let checks = self.daemon_check_blocks();
+        crate::blockcopy::cell(view, &self.checks_visible(&checks), column, row, clamp)
     }
 
     /// What a click on a chrome item does.

@@ -6,7 +6,7 @@ use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
 use devlanes_proto::RpcError;
 use devlanes_tui::{
     ApiError, DaemonApi, Options,
-    app::{App, Dialog, Effect, Msg, Target, View},
+    app::{App, DaemonBox, Dialog, Effect, Msg, Target, View},
     drive,
     logfile::{LogChunk, LogPosition},
 };
@@ -490,6 +490,337 @@ async fn dragging_over_the_daemon_log_copies_the_text() -> TestResult {
     Ok(())
 }
 
+/// The fake's doctor facts plus eight units whose stop timeouts outlast the
+/// launchd agent's default, more checks than the box beside the facts shows
+/// at 100x30.
+fn crowded_doctor() -> serde_json::Value {
+    let mut facts = doctor_facts();
+    facts["service"] = json!({
+        "manager": "launchd agent", "path": "/home/acme/Library/LaunchAgents/devlanes.plist",
+        "installed": false, "stop_window_s": 5, "window_source": "default",
+        "recommended_window_s": 60,
+    });
+    facts["stop_timeouts"] = (0..8)
+        .map(|i| json!({"project": "acme", "unit": format!("api-{i}"), "timeout_ms": 10_000}))
+        .collect();
+    facts
+}
+
+/// The daemon tab at 100x30 with [`crowded_doctor`]'s checks, drawn once.
+async fn crowded_app() -> Result<App, Box<dyn std::error::Error>> {
+    let mut app = daemon_app(100, 30).await?;
+    app.update(Msg::DaemonInfo {
+        status: Ok(daemon_status()),
+        doctor: Ok(crowded_doctor()),
+    });
+    render(&app)?;
+    Ok(app)
+}
+
+/// A mouse event at screen `(column, row)`.
+fn mouse(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> Msg {
+    Msg::Mouse(crossterm::event::MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+#[tokio::test]
+async fn the_checks_box_scrolls_when_its_checks_do_not_fit() -> TestResult {
+    use crossterm::event::MouseEventKind;
+    let mut app = crowded_app().await?;
+    let view = app.daemon_checks_view.get();
+    assert!(view.max_scroll > 0, "{view:?}");
+    let text = screen(&render(&app)?);
+    assert!(!text.contains("i shows all"), "{text}");
+    assert!(text.contains(&format!("rows 1-{}/", view.height)), "{text}");
+    let last_row: String = app
+        .daemon_check_blocks()
+        .last()
+        .and_then(|check| check.lines.last())
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .ok_or("no checks")?;
+    let last_row = last_row.trim();
+    assert!(!text.contains(last_row), "{last_row:?} is below: {text}");
+
+    // Tab hands j k g G to the checks; the log stays where it is.
+    app.update(key(KeyCode::Tab));
+    assert_eq!(app.daemon.focus, DaemonBox::Checks);
+    app.update(key(KeyCode::Char('j')));
+    assert_eq!(app.daemon.checks_scroll, 1);
+    assert_eq!((app.daemon.scroll, app.daemon.paused), (0, false));
+    app.update(key(KeyCode::Char('G')));
+    assert_eq!(app.daemon.checks_scroll, view.max_scroll);
+    let text = screen(&render(&app)?);
+    assert!(text.contains(last_row), "{last_row:?} shows: {text}");
+    app.update(key(KeyCode::Char('g')));
+    assert_eq!(app.daemon.checks_scroll, 0);
+    // Shift+Tab goes back to the log, which k scrolls again.
+    app.update(key(KeyCode::BackTab));
+    assert_eq!(app.daemon.focus, DaemonBox::Log);
+    let lines: Vec<String> = (0..60)
+        .map(|i| format!("2026-10-21T10:00:{i:02}.000Z  INFO devlanes_daemon: entry {i}"))
+        .collect();
+    app.update(Msg::DaemonLog(Ok(LogChunk {
+        lines,
+        position: LogPosition {
+            offset: 5000,
+            file: (1, 2),
+        },
+        reset: false,
+    })));
+    render(&app)?;
+    app.update(key(KeyCode::Char('k')));
+    assert_eq!((app.daemon.scroll, app.daemon.checks_scroll), (1, 0));
+
+    // The wheel scrolls the box under the pointer, whatever has focus.
+    app.update(mouse(MouseEventKind::ScrollDown, view.x, view.y));
+    assert_eq!(app.daemon.checks_scroll, 3.min(view.max_scroll));
+    assert_eq!(app.daemon.scroll, 1);
+    let log = app.daemon_log_view.get();
+    app.update(mouse(MouseEventKind::ScrollUp, log.x, log.y));
+    assert_eq!(app.daemon.scroll, 4);
+    assert_eq!(app.daemon.checks_scroll, 3.min(view.max_scroll));
+    // `i` lists every check from the top again.
+    app.update(key(KeyCode::Char('i')));
+    assert_eq!(app.daemon.checks_scroll, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn checks_text_is_selected_and_copied_like_the_log() -> TestResult {
+    let mut app = crowded_app().await?;
+    app.update(key(KeyCode::Tab));
+    assert!(app.update(key(KeyCode::Char('c'))).is_empty());
+    let cursor = app
+        .daemon
+        .checks_copy
+        .map(|c| c.cursor)
+        .ok_or("no copy mode")?;
+    assert_eq!((cursor.entry, cursor.line, cursor.column), (0, 0, 0));
+    assert!(app.daemon.copy.is_none());
+    let text = screen(&render(&app)?);
+    assert!(text.contains("selecting · v mark · y copy"), "{text}");
+    assert!(text.contains("Y copy whole checks"), "{text}");
+
+    // y without a mark: the cursor's row as drawn.
+    let row = copied(&app.update(key(KeyCode::Char('y'))))?;
+    assert!(row.starts_with("fail tls"), "{row}");
+    assert!(!row.contains('\n'), "{row}");
+    assert!(app.daemon.checks_copy.is_none());
+
+    // v, j and $: the first row and the whole fix row under it.
+    app.update(key(KeyCode::Char('c')));
+    app.update(key(KeyCode::Char('v')));
+    app.update(key(KeyCode::Char('j')));
+    app.update(key(KeyCode::Char('$')));
+    let rows = copied(&app.update(key(KeyCode::Char('y'))))?;
+    let lines: Vec<&str> = rows.lines().collect();
+    assert_eq!(lines.len(), 2, "{rows}");
+    assert_eq!(lines[1].trim_start(), "fix: devlanes certs trust", "{rows}");
+
+    // Y: the whole check with its fix, unwrapped.
+    app.update(key(KeyCode::Char('c')));
+    let whole = copied(&app.update(key(KeyCode::Char('Y'))))?;
+    assert!(whole.starts_with("fail tls: "), "{whole}");
+    assert!(whole.ends_with("\n  fix: devlanes certs trust"), "{whole}");
+
+    // The service check carries its units on a line of their own.
+    let checks = app.daemon_check_blocks();
+    let service = checks
+        .iter()
+        .find(|check| check.plain.starts_with("warn service: "))
+        .ok_or("no service check")?;
+    assert!(
+        service.plain.contains("\n  units: acme:api-0 (10s), "),
+        "{}",
+        service.plain
+    );
+
+    // Esc leaves without copying; q there does not quit.
+    app.update(key(KeyCode::Char('c')));
+    assert!(app.update(key(KeyCode::Char('q'))).is_empty());
+    assert!(app.daemon.checks_copy.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn dragging_over_the_checks_copies_their_text() -> TestResult {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = crowded_app().await?;
+    let view = app.daemon_checks_view.get();
+    let left = MouseButton::Left;
+    app.update(mouse(MouseEventKind::Down(left), view.x, view.y));
+    assert_eq!(
+        app.daemon.focus,
+        DaemonBox::Checks,
+        "a press focuses the box"
+    );
+    assert!(
+        app.daemon.checks_copy.is_none(),
+        "a press alone selects nothing"
+    );
+    // Past the right edge: the selection ends at the box's last column.
+    let right = view.x + u16::try_from(view.width)? + 5;
+    app.update(mouse(MouseEventKind::Drag(left), right, view.y + 1));
+    assert!(
+        app.daemon
+            .checks_copy
+            .is_some_and(|copy| copy.anchor.is_some())
+    );
+    let text = copied(&app.update(mouse(MouseEventKind::Up(left), right, view.y + 1)))?;
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].starts_with("fail tls"), "{text}");
+    assert_eq!(lines[1].trim_start(), "fix: devlanes certs trust", "{text}");
+    assert!(app.daemon.checks_copy.is_none() && app.daemon.copy.is_none());
+
+    // A click without a drag copies nothing; one in the log focuses it.
+    app.update(mouse(MouseEventKind::Down(left), view.x, view.y));
+    let effects = app.update(mouse(MouseEventKind::Up(left), view.x, view.y));
+    assert!(effects.is_empty(), "{effects:?}");
+    let log = app.daemon_log_view.get();
+    app.update(mouse(MouseEventKind::Down(left), log.x, log.y));
+    app.update(mouse(MouseEventKind::Up(left), log.x, log.y));
+    assert_eq!(app.daemon.focus, DaemonBox::Log);
+    Ok(())
+}
+
+#[tokio::test]
+async fn copy_mode_on_the_checks_scrolls_them_to_the_cursor() -> TestResult {
+    let mut app = crowded_app().await?;
+    let view = app.daemon_checks_view.get();
+    app.update(key(KeyCode::Tab));
+    app.update(key(KeyCode::Char('c')));
+    app.update(key(KeyCode::Char('G')));
+    assert_eq!(app.daemon.checks_scroll, view.max_scroll);
+    let rows: usize = app
+        .daemon_check_blocks()
+        .iter()
+        .map(|c| c.lines.len())
+        .sum();
+    // k up to the first row shown: the box stays; one more scrolls a row.
+    for _ in 0..view.height - 1 {
+        app.update(key(KeyCode::Char('k')));
+    }
+    assert_eq!(app.daemon.checks_scroll, rows - view.height);
+    app.update(key(KeyCode::Char('k')));
+    assert_eq!(app.daemon.checks_scroll, rows - view.height - 1);
+    app.update(key(KeyCode::Char('g')));
+    assert_eq!(app.daemon.checks_scroll, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refresh_with_other_checks_ends_their_copy_mode() -> TestResult {
+    let mut app = crowded_app().await?;
+    app.update(key(KeyCode::Tab));
+    app.update(key(KeyCode::Char('G')));
+    app.update(key(KeyCode::Char('c')));
+    assert!(app.daemon.checks_copy.is_some());
+    // The same checks again keep the selection.
+    app.update(Msg::DaemonInfo {
+        status: Ok(daemon_status()),
+        doctor: Ok(crowded_doctor()),
+    });
+    assert!(app.daemon.checks_copy.is_some());
+    // Fewer checks: the selection would point at other text, and the scroll
+    // stays within the rows left.
+    app.update(Msg::DaemonInfo {
+        status: Ok(daemon_status()),
+        doctor: Ok(doctor_facts()),
+    });
+    assert!(app.daemon.checks_copy.is_none());
+    let rows: usize = app
+        .daemon_check_blocks()
+        .iter()
+        .map(|c| c.lines.len())
+        .sum();
+    let height = app.daemon_checks_view.get().height;
+    assert_eq!(app.daemon.checks_scroll, rows.saturating_sub(height));
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_one_box_selects_at_a_time() -> TestResult {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = crowded_app().await?;
+    let view = app.daemon_checks_view.get();
+    let left = MouseButton::Left;
+    // Log copy mode, then a drag over the checks: the checks select instead.
+    app.update(key(KeyCode::Char('c')));
+    assert!(app.daemon.copy.is_some());
+    app.update(mouse(MouseEventKind::Down(left), view.x, view.y));
+    assert!(app.daemon.copy.is_none());
+    app.update(mouse(MouseEventKind::Drag(left), view.x + 4, view.y));
+    assert!(app.daemon.checks_copy.is_some() && app.daemon.copy.is_none());
+    // A drag into the log stops at the checks' last row shown.
+    let log = app.daemon_log_view.get();
+    app.update(mouse(MouseEventKind::Drag(left), view.x + 4, log.y + 2));
+    let cursor = app
+        .daemon
+        .checks_copy
+        .map(|c| c.cursor)
+        .ok_or("no selection")?;
+    let last = app.daemon_check_blocks().len() - 1;
+    assert!(cursor.entry <= last, "{cursor:?}");
+    assert!(app.daemon.copy.is_none());
+    app.update(mouse(MouseEventKind::Up(left), view.x + 4, log.y + 2));
+    // Checks copy mode, then a press in the log ends it.
+    app.update(key(KeyCode::Char('c')));
+    assert!(app.daemon.checks_copy.is_some());
+    let buffer = render(&app)?;
+    let compose = (0..buffer.area.height)
+        .find(|y| row(&buffer, *y).contains("compose failed"))
+        .ok_or("no compose row")?;
+    app.update(mouse(MouseEventKind::Down(left), log.x, compose));
+    assert!(app.daemon.checks_copy.is_none());
+    assert_eq!(app.daemon.focus, DaemonBox::Log);
+    Ok(())
+}
+
+#[tokio::test]
+async fn below_100_columns_only_the_checks_under_the_facts_scroll() -> TestResult {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = daemon_app(80, 24).await?;
+    app.update(Msg::DaemonInfo {
+        status: Ok(daemon_status()),
+        doctor: Ok(crowded_doctor()),
+    });
+    let text = screen(&render(&app)?);
+    let view = app.daemon_checks_view.get();
+    assert!(view.max_scroll > 0, "{view:?}");
+    // The facts take the box's first two rows; the checks start under them.
+    let box_area = app.daemon_checks_box.get();
+    assert_eq!(view.y, box_area.y + 3, "{text}");
+    assert!(text.contains("socket"), "{text}");
+    // The wheel over the facts scrolls the checks; the facts stay.
+    app.update(mouse(
+        MouseEventKind::ScrollDown,
+        box_area.x + 2,
+        box_area.y + 1,
+    ));
+    assert_eq!(app.daemon.checks_scroll, 3.min(view.max_scroll));
+    let text = screen(&render(&app)?);
+    assert!(text.contains("socket"), "{text}");
+    // A drag over the first row shown copies what it shows.
+    app.update(key(KeyCode::Tab));
+    app.update(key(KeyCode::Char('g')));
+    let left = MouseButton::Left;
+    app.update(mouse(MouseEventKind::Down(left), view.x, view.y));
+    app.update(mouse(MouseEventKind::Drag(left), view.x + 7, view.y));
+    let row = copied(&app.update(mouse(MouseEventKind::Up(left), view.x + 7, view.y)))?;
+    assert_eq!(row, "fail tls");
+    Ok(())
+}
+
 #[tokio::test]
 async fn copy_mode_jumps_scroll_the_long_log_to_the_cursor() -> TestResult {
     let mut app = daemon_app(100, 30).await?;
@@ -656,6 +987,7 @@ async fn help_lists_clean_and_the_daemon_page() -> TestResult {
     for expected in [
         "clean the lane (asks first)",
         "copy mode: v select, y copy, Y whole entries as in the file",
+        "move j k g G and c between the checks and the log",
         "restart, stop or start the daemon",
         "clean every lane whose worktree is gone",
         "hide the version notice",

@@ -889,9 +889,12 @@ fn doctor_warns_about_stop_timeouts_past_the_service_window() {
     assert!(text.contains("--- plain (exit 0)"), "{text}");
     assert!(text.contains("the daemon gets 60s to stop"), "{text}");
     assert!(
-        text.contains("1 unit with a stop timeout longer than the 60s the launchd agent gives the daemon to stop: acme:db (90s)"),
+        text.contains(
+            "1 unit can take too long to stop for the 60s the launchd agent gives the daemon\n"
+        ),
         "{text}"
     );
+    assert!(text.contains("unit: acme:db (90s)\n"), "{text}");
     assert!(
         text.contains("lower services.<name>.stop.timeout to 55s or less"),
         "{text}"
@@ -901,7 +904,11 @@ fn doctor_warns_about_stop_timeouts_past_the_service_window() {
     let data = json!({"service": service(false, 5), "stop_timeouts": timeouts});
     let text = render_text(Method::Doctor, &data);
     assert!(
-        text.contains("2 units with a stop timeout longer than the 5s a launchd agent gets by default (devlanes is not installed as a service): acme:api (10s), acme:db (90s)"),
+        text.contains("2 units can take too long to stop for the 5s a launchd agent gets by default (devlanes is not installed as a service)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("units: acme:api (10s), acme:db (90s)\n"),
         "{text}"
     );
     assert!(
@@ -918,9 +925,105 @@ fn doctor_warns_about_stop_timeouts_past_the_service_window() {
         "{text}"
     );
     assert!(
-        text.contains("devlanes daemon install, which gives the daemon 60s"),
+        text.contains(
+            "1 unit can take too long to stop for the 5s the launchd agent gives the daemon\n"
+        ),
         "{text}"
     );
+    assert!(
+        text.contains("devlanes daemon install (gives the daemon 60s to stop)"),
+        "{text}"
+    );
+
+    // More units than a detail line names are counted.
+    let many: Vec<Value> = (0..7)
+        .map(|n| json!({"project": "acme", "unit": format!("u{n}"), "timeout_ms": 10_000}))
+        .collect();
+    let data = json!({"service": service(false, 5), "stop_timeouts": many});
+    let text = render_text(Method::Doctor, &data);
+    assert!(
+        text.contains(
+            "units: acme:u0 (10s), acme:u1 (10s), acme:u2 (10s), acme:u3 (10s), acme:u4 (10s), 2 more\n"
+        ),
+        "{text}"
+    );
+}
+
+/// `doctor` text of `data` in one output mode.
+fn doctor_in(mode: OutputMode, data: &Value) -> String {
+    runtime(mode)
+        .reporter()
+        .result(&Report::new(Method::Doctor, data))
+        .expect("render")
+        .stdout
+}
+
+#[test]
+/// A check's detail is its own line between the text and the fix, indented like
+/// the fix in every mode; checks without a detail print no extra line.
+fn doctor_prints_the_detail_line_before_the_fix() {
+    let data = json!({
+        "running": false,
+        "service": {
+            "manager": "launchd agent", "path": "/u/Library/LaunchAgents/run.devlanes.daemon.plist",
+            "installed": true, "stop_window_s": 60, "window_source": "installed",
+            "recommended_window_s": 60,
+        },
+        "stop_timeouts": [{"project": "acme", "unit": "db", "timeout_ms": 90_000}],
+    });
+    let fix = "fix: lower services.<name>.stop.timeout to 55s or less";
+
+    let agent = doctor_in(OutputMode::Agent, &data);
+    assert!(
+        agent.contains(&format!(
+            "warn service: 1 unit can take too long to stop for the 60s the launchd agent gives the daemon\n  unit: acme:db (90s)\n  {fix}\n"
+        )),
+        "{agent}"
+    );
+
+    for mode in [OutputMode::Human, OutputMode::Plain] {
+        let text = doctor_in(mode, &data);
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| {
+                line.ends_with(
+                    "1 unit can take too long to stop for the 60s the launchd agent gives the daemon",
+                )
+            })
+            .unwrap_or_else(|| panic!("{text}"));
+        assert_eq!(lines[at + 1], "    unit: acme:db (90s)", "{text}");
+        assert_eq!(lines[at + 2], format!("    {fix}"), "{text}");
+    }
+
+    for text in [
+        agent,
+        doctor_in(OutputMode::Human, &data),
+        doctor_in(OutputMode::Plain, &data),
+    ] {
+        let lines: Vec<&str> = text.lines().collect();
+        // A fix without a detail follows its check directly.
+        let daemon = lines
+            .iter()
+            .position(|line| line.contains("not running"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert_eq!(
+            lines[daemon + 1].trim(),
+            "fix: devlanes daemon start",
+            "{text}"
+        );
+        // A check with neither is followed by the next check or group.
+        let ok = lines
+            .iter()
+            .position(|line| line.ends_with("the daemon gets 60s to stop"))
+            .unwrap_or_else(|| panic!("{text}"));
+        let next = lines[ok + 1].trim_start();
+        assert!(
+            !next.starts_with("unit:") && !next.starts_with("fix:"),
+            "{text}"
+        );
+        assert_eq!(text.matches("unit: ").count(), 1, "{text}");
+    }
 }
 
 #[test]

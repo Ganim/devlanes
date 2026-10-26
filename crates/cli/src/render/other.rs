@@ -637,18 +637,26 @@ struct Check {
     group: &'static str,
     outcome: Outcome,
     text: String,
+    detail: Option<String>,
     fix: Option<String>,
 }
 
 impl Check {
-    /// A check with no fix.
+    /// A check with no detail and no fix.
     fn new(group: &'static str, outcome: Outcome, text: impl Into<String>) -> Self {
         Self {
             group,
             outcome,
             text: text.into(),
+            detail: None,
             fix: None,
         }
+    }
+
+    /// Adds the detail line, shown under the text and before the fix.
+    fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 
     /// Adds the fix line.
@@ -755,12 +763,14 @@ pub enum DoctorState {
 }
 
 /// One doctor check as `devlanes doctor` words it: the group (`tls`, `hosts`),
-/// the outcome, the line and the command that fixes it.
+/// the outcome, the line, an optional detail line shown under it (such as the
+/// units a check names) and the command that fixes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorCheck {
     pub group: &'static str,
     pub state: DoctorState,
     pub text: String,
+    pub detail: Option<String>,
     pub fix: Option<String>,
 }
 
@@ -779,6 +789,7 @@ pub fn doctor_checks_of(data: &Value) -> Vec<DoctorCheck> {
                 Outcome::Fail => DoctorState::Fail,
             },
             text: check.text,
+            detail: check.detail,
             fix: check.fix,
         })
         .collect()
@@ -1138,13 +1149,19 @@ fn service_checks(data: &Value) -> Vec<Check> {
     if late.len() > NAMED_UNITS {
         named.push(format!("{} more", late.len() - NAMED_UNITS));
     }
-    let window_words = if installed {
-        format!("the {window}s the {manager} gives the daemon to stop")
+    let units = plural(late.len(), "unit");
+    // "can take": the check reads the configured stop timeout, an upper bound,
+    // and the shutdown margin flags units whose timeout is just under the window.
+    let summary = if installed {
+        format!(
+            "{units} can take too long to stop for the {window}s the {manager} gives the daemon"
+        )
     } else {
         format!(
-            "the {window}s a {manager} gets by default (devlanes is not installed as a service)"
+            "{units} can take too long to stop for the {window}s a {manager} gets by default (devlanes is not installed as a service)"
         )
     };
+    let label = if late.len() == 1 { "unit" } else { "units" };
     let fits = recommended - SHUTDOWN_MARGIN_S;
     let fix = if window >= recommended {
         format!(
@@ -1152,23 +1169,16 @@ fn service_checks(data: &Value) -> Vec<Check> {
             window - SHUTDOWN_MARGIN_S
         )
     } else if longest <= fits {
-        format!("devlanes daemon install, which gives the daemon {recommended}s")
+        format!("devlanes daemon install (gives the daemon {recommended}s to stop)")
     } else {
         format!(
             "devlanes daemon install, and lower services.<name>.stop.timeout to {fits}s or less"
         )
     };
     checks.push(
-        Check::new(
-            "service",
-            Outcome::Skip,
-            format!(
-                "{} with a stop timeout longer than {window_words}: {}",
-                plural(late.len(), "unit"),
-                named.join(", ")
-            ),
-        )
-        .fix(fix),
+        Check::new("service", Outcome::Skip, summary)
+            .detail(format!("{label}: {}", named.join(", ")))
+            .fix(fix),
     );
     checks
 }
@@ -1881,7 +1891,8 @@ fn ago(ms: u64) -> String {
     }
 }
 
-/// `doctor`: grouped checks, each failing or degraded one with a fix.
+/// `doctor`: grouped checks, each failing or degraded one with a fix, and a
+/// check's detail on its own line before the fix.
 pub(super) fn doctor(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
     let mut checks = doctor_checks(data, cx);
     let mut lines = Vec::new();
@@ -1898,6 +1909,9 @@ pub(super) fn doctor(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
                 Outcome::Fail => "fail",
             };
             lines.push(format!("{word} {}: {}", check.group, check.text));
+            if let Some(detail) = check.detail {
+                lines.push(format!("  {detail}"));
+            }
             if let Some(fix) = check.fix {
                 lines.push(format!("  fix: {fix}"));
             }
@@ -1920,6 +1934,9 @@ pub(super) fn doctor(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
                 (Outcome::Fail, false) => "fail".into(),
             };
             lines.push(format!("  {word} {}", check.text));
+            if let Some(detail) = &check.detail {
+                lines.push(format!("    {detail}"));
+            }
             if let Some(fix) = &check.fix {
                 lines.push(format!("    fix: {fix}"));
             }
