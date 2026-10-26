@@ -104,6 +104,22 @@
         throw "devlanes install: no $Target archive listed in $Source"
     }
 
+    function Get-DevlanesFileHash {
+        <# The lowercase hex SHA-256 of a file. #>
+        param([string]$Path)
+        # Not Get-FileHash: Windows PowerShell defines it in its own Utility module, and
+        # with a module path inherited from pwsh (or a shell pwsh started, such as Git
+        # Bash) it loads PowerShell 7's Utility module instead, which lacks it.
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $stream.Dispose()
+            $sha.Dispose()
+        }
+    }
+
     function Get-DevlanesDownload {
         <# Downloads Url to OutFile; only the listed URL schemes are accepted. #>
         param([string]$Url, [string]$OutFile, [string[]]$Schemes)
@@ -293,7 +309,7 @@
             $url = "$base/download/$folder/$($release.Archive)"
             $archive = Join-Path $temporary $release.Archive
             Get-DevlanesDownload -Url $url -OutFile $archive -Schemes $schemes
-            $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actual = Get-DevlanesFileHash $archive
             if ($actual -ne $release.Hash) {
                 throw "devlanes install: checksum mismatch for $($release.Archive): expected $($release.Hash), got $actual"
             }
