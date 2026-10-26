@@ -1,7 +1,7 @@
 [package]
 name = "devlanes-hosts-helper"
 description = "Root helper that writes devlanes hostnames to a marked block in /etc/hosts."
-version = "0.4.2"
+version = "0.4.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
