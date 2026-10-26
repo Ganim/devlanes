@@ -10,6 +10,7 @@ pub mod banner;
 pub mod blockcopy;
 pub mod daemonlog;
 pub mod doctor;
+pub mod exit_summary;
 pub mod graph;
 #[cfg(windows)]
 mod home;
@@ -115,27 +116,10 @@ pub async fn run(paths: Paths) -> Result<(), Error> {
 /// Opens the TUI with the user config's options.
 ///
 /// Connects (spawning the daemon when needed) before touching the terminal,
-/// so connection errors print normally.
+/// so connection errors print normally. Once it closed, prints the
+/// [`exit_summary`].
 pub async fn run_with(paths: Paths, options: Options) -> Result<(), Error> {
-    if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
-        return Err(Error::NotATerminal);
-    }
-    let api: Arc<dyn DaemonApi> = ClientApi::connect(paths).await?;
-    let guard = TerminalGuard::enter()?;
-    let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
-    let mut terminal = ratatui::Terminal::new(backend)?;
-    terminal.clear()?;
-    let events = crossterm::event::EventStream::new();
-    let result = drive(
-        &mut terminal,
-        api,
-        &options,
-        events,
-        Box::new(std::io::stdout()),
-    )
-    .await;
-    drop(guard);
-    result
+    open(paths, options, None).await.map(drop)
 }
 
 /// Opens the TUI on a start the daemon already accepted (see [`start`]) and
@@ -145,6 +129,17 @@ pub async fn run_start(
     options: Options,
     start: start::StartHandoff,
 ) -> Result<start::StartExit, Error> {
+    let app = open(paths, options, Some(start)).await?;
+    Ok(app.start_exit().unwrap_or(start::StartExit::Pending))
+}
+
+/// Runs the TUI on the real terminal, then prints the [`exit_summary`];
+/// returns the app as it was when the user quit.
+async fn open(
+    paths: Paths,
+    options: Options,
+    start: Option<start::StartHandoff>,
+) -> Result<app::App, Error> {
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         return Err(Error::NotATerminal);
     }
@@ -154,9 +149,9 @@ pub async fn run_start(
     let mut terminal = ratatui::Terminal::new(backend)?;
     terminal.clear()?;
     let events = crossterm::event::EventStream::new();
-    let result = drive_start(
+    let result = runtime::run_loop(
         &mut terminal,
-        api,
+        Arc::clone(&api),
         &options,
         events,
         Box::new(std::io::stdout()),
@@ -164,5 +159,8 @@ pub async fn run_start(
     )
     .await;
     drop(guard);
-    result
+    let app = result?;
+    let lane = app.selected.as_ref().map(|selected| selected.lane.as_str());
+    exit_summary::print(api.as_ref(), &app.theme, lane).await;
+    Ok(app)
 }

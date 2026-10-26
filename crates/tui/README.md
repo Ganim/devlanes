@@ -49,6 +49,8 @@ terminal:
 
 Quitting closes connections; units, tasks and containers keep running in the daemon. While lanes of the project on screen run, `q` asks whether to keep them or stop them first, unless `tui.on_quit` (`ask`, `keep` or `stop`) says; the dialog's "remember" box writes that setting.
 
+Once the TUI closed, `run_with` and `run_start` print the devlanes banner, the lane shown last with its state, whether the daemon still runs and how many lanes it runs, and `devlanes stop --lane <lane>` while that lane runs (`exit_summary`). The daemon gets one second to answer `status` for it.
+
 Moving through the list watches a unit without resizing its PTY. Enter, a double click or a click in the pane types into it: the stream reopens as the PTY's owner and the pane takes over its size, as zoom does. Esc or Ctrl+] ends typing; inside full-screen programs only Ctrl+], which crossterm may report as Ctrl+5. Units on pipes (`pty: false` from the daemon) are never resized.
 
 While lanes start, the terminal tab's progress bar shows ready services over the services starting, across every starting lane. A failed start shows red for three seconds. Quitting, a panic or `terminal.progress: never` clears it; see `devlanes-term` for where it is drawn.

@@ -212,7 +212,7 @@ async fn next_start(start: &mut Option<mpsc::Receiver<StartFrame>>) -> StartFram
 
 /// The event loop behind [`drive`] and [`drive_start`]; returns the app as it
 /// was when the user quit.
-async fn run_loop<B, E>(
+pub(crate) async fn run_loop<B, E>(
     terminal: &mut Terminal<B>,
     api: Arc<dyn DaemonApi>,
     options: &Options,
