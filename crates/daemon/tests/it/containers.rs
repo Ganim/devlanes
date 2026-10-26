@@ -371,6 +371,231 @@ async fn shared_containers_show_in_every_lane() {
     .expect("timeout");
 }
 
+/// Unix ms of the fake infra's log line `n`.
+fn fake_ms(n: u64) -> u64 {
+    1_767_225_600_000 + n * 1000
+}
+
+/// The texts of a log page.
+fn texts(page: &Value) -> Vec<String> {
+    page["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter_map(|line| line["text"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// `infra.logs` reads the lane's container by its Docker name: the last
+/// `tail` lines with Docker's timestamps and colors on request; a shared
+/// container works from any lane, a lane that never started finds it through
+/// the provider, and an unknown name lists the containers there are.
+async fn infra_logs_reads_the_lanes_container() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                ..Setup::default()
+            },
+        )
+        .await;
+        *h.infra.logs.lock().expect("logs") =
+            vec!["one".into(), "two".into(), "\x1b[31mthree\x1b[0m".into()];
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+
+        let page = h
+            .call(
+                Method::InfraLogs,
+                json!({"container": "db", "tail": 2, "styled": true}),
+                cx(&main),
+            )
+            .await
+            .expect("logs");
+        assert_eq!(texts(&page), ["two", "three"]);
+        let items = page["items"].as_array().expect("items");
+        assert_eq!(items[0]["unit"], "db");
+        assert_eq!(items[0]["seq"], 1);
+        assert_eq!(items[0]["timestamp_ms"], fake_ms(1));
+        assert!(items[0].get("styled").is_none(), "{page}");
+        assert_eq!(items[1]["styled"], "\x1b[31mthree\x1b[0m\x1b[0m");
+        assert_eq!(page["truncated"], true);
+        assert!(
+            h.infra
+                .log_requests
+                .entries()
+                .contains(&"demo-lane0-db-1 tail=Some(2) follow=false".to_owned()),
+            "{:?}",
+            h.infra.log_requests.entries()
+        );
+
+        let plain = h
+            .call(Method::InfraLogs, json!({"container": "db"}), cx(&main))
+            .await
+            .expect("default tail");
+        assert_eq!(texts(&plain), ["one", "two", "three"]);
+        assert!(plain["items"][2].get("styled").is_none());
+        assert_eq!(plain["truncated"], false);
+
+        h.call(Method::LaneNew, json!({"name": "idle"}), cx(&main))
+            .await
+            .expect("second lane");
+        let idle = devlanes_proto::Context {
+            lane: Some("demo@1".into()),
+            ..cx(&main)
+        };
+        h.call(
+            Method::InfraLogs,
+            json!({"container": "cache"}),
+            idle.clone(),
+        )
+        .await
+        .expect("shared container");
+        h.call(Method::InfraLogs, json!({"container": "db"}), idle)
+            .await
+            .expect("container found by the provider");
+        let requests = h.infra.log_requests.entries();
+        assert!(
+            requests.iter().any(|r| r.starts_with("demo-cache-1 "))
+                && requests.iter().any(|r| r.starts_with("demo-lane1-db-1 ")),
+            "{requests:?}"
+        );
+
+        let missing = h
+            .call(Method::InfraLogs, json!({"container": "nope"}), cx(&main))
+            .await
+            .expect_err("unknown container");
+        assert_eq!(missing.code, "not_found");
+        assert_eq!(missing.data["candidates"], json!(["cache", "db"]));
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A service with several replicas merges their lines by time, each prefixed
+/// with its replica.
+async fn infra_logs_merge_replicas() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                ..Setup::default()
+            },
+        )
+        .await;
+        *h.infra.db_replicas.lock().expect("replicas") = 2;
+        *h.infra.logs.lock().expect("logs") = vec!["one".into(), "two".into()];
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        let page = h
+            .call(
+                Method::InfraLogs,
+                json!({"container": "db", "tail": 3}),
+                cx(&main),
+            )
+            .await
+            .expect("logs");
+        assert_eq!(texts(&page), ["db-2 | one", "db-1 | two", "db-2 | two"]);
+        assert_eq!(page["truncated"], true);
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+/// The next `log` event's line on `frames`.
+async fn next_log(frames: &mut tokio::sync::mpsc::Receiver<devlanes_ipc::Frame>) -> Value {
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), frames.recv())
+            .await
+            .expect("a log event in time")
+            .expect("session open");
+        if let devlanes_ipc::Frame::Control(devlanes_proto::Control::Event(event)) = frame
+            && event.event == devlanes_proto::events::LOG
+        {
+            assert_eq!(event.data["unit"], "db");
+            return event.data["line"].clone();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// `infra.logs` with `follow` sends the tail, then new lines, and resumes
+/// without repeats when the container's stream ends and it runs again.
+async fn infra_logs_follow_resumes_after_a_restart() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                ..Setup::default()
+            },
+        )
+        .await;
+        *h.infra.logs.lock().expect("logs") = vec!["one".into(), "two".into()];
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        let (session, mut frames) = h.session();
+        let follow = h.call_on(
+            Method::InfraLogs,
+            json!({"container": "db", "tail": 1, "follow": true}),
+            cx(&main),
+            &session,
+        );
+        let driver = async {
+            let first = next_log(&mut frames).await;
+            assert_eq!((&first["text"], &first["seq"]), (&json!("two"), &json!(1)));
+            h.infra.push_log("three");
+            assert_eq!(next_log(&mut frames).await["text"], "three");
+            h.infra.end_logs();
+            h.infra.push_log("four");
+            let resumed = next_log(&mut frames).await;
+            assert_eq!(
+                (&resumed["text"], &resumed["seq"]),
+                (&json!("four"), &json!(3))
+            );
+            assert_eq!(resumed["timestamp_ms"], fake_ms(3));
+            session.close();
+        };
+        let (done, ()) = tokio::join!(follow, driver);
+        assert_eq!(done.expect("follow")["items"], json!([]));
+        let follows = h
+            .infra
+            .log_requests
+            .entries()
+            .iter()
+            .filter(|r| r.ends_with("follow=true"))
+            .count();
+        assert_eq!(follows, 2, "{:?}", h.infra.log_requests.entries());
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
 /// `ContainerSummary.state` of the lane's `db` container.
 async fn db_state(h: &crate::Harness, main: &std::path::Path) -> Option<String> {
     let status = h.call(Method::Status, json!({}), cx(main)).await.ok()?;

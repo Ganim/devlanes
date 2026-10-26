@@ -13,6 +13,7 @@ macro_rules! assert_screen {
     }};
 }
 
+mod containers;
 mod daemon;
 mod errors;
 mod fake;

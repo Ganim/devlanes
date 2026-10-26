@@ -5,13 +5,15 @@ use std::{
 
 use bollard::{
     Docker,
+    container::LogOutput,
     models::{ContainerCreateBody, ContainerSummary, HostConfig, PortBinding, VolumeCreateRequest},
     query_parameters::{
         CreateContainerOptionsBuilder, CreateImageOptionsBuilder, EventsOptionsBuilder,
-        ListContainersOptionsBuilder, ListVolumesOptionsBuilder, RemoveContainerOptionsBuilder,
-        RemoveVolumeOptionsBuilder, StopContainerOptionsBuilder,
+        ListContainersOptionsBuilder, ListVolumesOptionsBuilder, LogsOptionsBuilder,
+        RemoveContainerOptionsBuilder, RemoveVolumeOptionsBuilder, StopContainerOptionsBuilder,
     },
 };
+use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use serde::Serialize;
 
@@ -94,6 +96,49 @@ pub struct ManagedContainer {
 pub struct Removed {
     pub containers: Vec<String>,
     pub volumes: Vec<String>,
+}
+
+/// Options for [`DockerInfra::logs`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LogOptions {
+    /// The last N lines of stored output; `None` sends all of it.
+    pub tail: Option<usize>,
+    /// Keep the stream open for new output until the container stops.
+    pub follow: bool,
+    /// Only output from this Unix second on.
+    pub since: Option<i64>,
+    /// Prefix every line with its RFC 3339 nanosecond timestamp and a space.
+    pub timestamps: bool,
+}
+
+/// The output a [`LogChunk`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogStream {
+    Stdout,
+    Stderr,
+    /// A container with a TTY, whose stdout and stderr Docker cannot tell apart.
+    Console,
+}
+
+/// Bytes of container output. A line can span several chunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogChunk {
+    pub stream: LogStream,
+    pub bytes: Bytes,
+}
+
+impl LogChunk {
+    /// Maps bollard's output; stdin echo is dropped.
+    fn from_output(output: LogOutput) -> Option<Self> {
+        let (stream, bytes) = match output {
+            LogOutput::StdOut { message } => (LogStream::Stdout, message),
+            LogOutput::StdErr { message } => (LogStream::Stderr, message),
+            LogOutput::Console { message } => (LogStream::Console, message),
+            LogOutput::StdIn { .. } => return None,
+        };
+        Some(Self { stream, bytes })
+    }
 }
 
 /// Plain Docker containers through the Engine API. Cloning shares the connection.
@@ -364,6 +409,33 @@ impl DockerInfra {
             labels::PROJECT.to_owned(),
             project.to_owned(),
         )]))
+    }
+
+    /// Stdout and stderr of `container` (a name or id), as Docker sends it. Any
+    /// container works, plain or compose. With `follow` the stream stays open
+    /// until the container stops; without it, it ends after the stored output.
+    pub fn logs(
+        &self,
+        container: &str,
+        options: LogOptions,
+    ) -> BoxStream<'static, Result<LogChunk, Error>> {
+        let tail = options
+            .tail
+            .map_or_else(|| "all".to_owned(), |tail| tail.to_string());
+        let mut builder = LogsOptionsBuilder::new()
+            .stdout(true)
+            .stderr(true)
+            .follow(options.follow)
+            .timestamps(options.timestamps)
+            .tail(&tail);
+        if let Some(since) = options.since {
+            builder = builder.since(i32::try_from(since).unwrap_or(i32::MAX));
+        }
+        self.docker
+            .logs(container, Some(builder.build()))
+            .map_err(Error::from)
+            .try_filter_map(|output| async move { Ok(LogChunk::from_output(output)) })
+            .boxed()
     }
 
     async fn list(

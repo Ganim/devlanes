@@ -57,7 +57,7 @@
 │   ▸ setup                             4 done ││                                                                                                                                                      │
 │                                              ││                                                                                                                                                      │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- r restart   n next problem   pgup scroll back   c select text   / filter                                                                                                         ? all keys   q quit
+ r restart   e error details   n next problem   pgup scroll back   c select text   / filter                                                                                       ? all keys   q quit
 
 --- styles (row: columns style) ---
 0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 41-176 red, 179 bold, 180-187 dim, 191 bold, 192-198 dim
@@ -119,4 +119,4 @@
 56: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 199 darkgray
 57: 0 darkgray, 47-48 darkgray, 199 darkgray
 58: 0-199 darkgray
-59: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-64 dim, 65 bold, 66-75 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim
+59: 1 bold, 2-12 dim, 13 bold, 14-30 dim, 31 bold, 32-47 dim, 48-51 bold, 52-66 dim, 67 bold, 68-82 dim, 83 bold, 84-93 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim

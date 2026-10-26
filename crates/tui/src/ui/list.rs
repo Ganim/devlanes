@@ -224,9 +224,18 @@ fn row_line(app: &App, lane: &LaneSummary, item: &Row, width: usize) -> Line<'st
         RowId::Task(name) => {
             let info = app.task_info(&lane.reference, name);
             let look = task_look(theme, info, app.spin);
-            let mut right = vec![Span::styled(look.word.clone(), theme.tone(look.word_tone))];
-            if !look.detail.is_empty() && look.tone == Tone::Failure {
-                right.push(Span::styled(look.detail.clone(), theme.tone(Tone::Failure)));
+            let mut right = Vec::new();
+            // A failed `run` says more than the last run's state, as on unit rows.
+            if let Some(entry) = target_error(app, &lane.reference, Some(name)) {
+                right.push(Span::styled(
+                    format!("{} failed", clean(entry.verb())),
+                    theme.tone(Tone::Failure),
+                ));
+            } else {
+                right.push(Span::styled(look.word.clone(), theme.tone(look.word_tone)));
+                if !look.detail.is_empty() && look.tone == Tone::Failure {
+                    right.push(Span::styled(look.detail.clone(), theme.tone(Tone::Failure)));
+                }
             }
             if info.is_some_and(|i| i.runs_at_start()) {
                 right.push(Span::styled("runs at start", theme.quiet()));
@@ -366,7 +375,7 @@ fn unit_line(
         item,
         color,
         (look.glyph, look.tone),
-        clean(unit.label()),
+        clean(tree::short_name(unit)),
         quiet,
     );
     row(left, joined(right, theme.quiet()), width)

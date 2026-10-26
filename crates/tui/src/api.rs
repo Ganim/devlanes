@@ -460,6 +460,20 @@ pub trait DaemonApi: Send + Sync {
     async fn task_list(&self, _lane: String) -> Result<Vec<TaskInfo>, ApiError> {
         Ok(Vec::new())
     }
+    /// `infra.logs` with `follow` for one infra container of `lane`: its last
+    /// `tail` lines, then new ones, as `log` events until the stream is dropped.
+    async fn follow_container(
+        &self,
+        _lane: String,
+        _container: String,
+        _tail: usize,
+    ) -> Result<EventStream, ApiError> {
+        Err(ApiError::Rpc(RpcError::new(
+            "unknown_method",
+            json!({"method": "infra.logs"}),
+            2,
+        )))
+    }
     /// The daemon's own log file, read directly because the TUI runs on the
     /// same machine. `None` when there is no local file.
     fn daemon_log(&self) -> Option<PathBuf> {
@@ -481,6 +495,43 @@ pub trait DaemonApi: Send + Sync {
             .unwrap_or_default();
         (method, dismissed)
     }
+}
+
+/// Forwards the events of request `id` on `client` until its terminal
+/// response; an error response or a lost connection is the last item.
+fn pump_events(mut client: Client, id: u64) -> EventStream {
+    let (sender, receiver) = mpsc::channel(EVENT_QUEUE);
+    tokio::spawn(async move {
+        let ending = loop {
+            // A replaced stream is dropped; stop at once instead of holding the
+            // connection until the next event fails to send.
+            let frame = tokio::select! {
+                frame = client.next_frame() => frame,
+                () = sender.closed() => return,
+            };
+            match frame {
+                Ok(Frame::Control(Control::Event(event))) => {
+                    if sender.send(Ok(event)).await.is_err() {
+                        // The TUI dropped the stream; nobody is listening.
+                        return;
+                    }
+                }
+                // A terminal response ends the stream; an error says why.
+                Ok(Frame::Control(Control::Response(response))) if response.id == id => {
+                    match response.result {
+                        Outcome::Ok { .. } => return,
+                        Outcome::Error { error } => break ApiError::Rpc(error),
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => break ApiError::from(error),
+            }
+        };
+        if sender.send(Err(ending)).await.is_err() {
+            // The TUI dropped the stream first; there is nobody left to tell.
+        }
+    });
+    EventStream::new(receiver)
 }
 
 /// One profile from `profile.list`.
@@ -718,38 +769,23 @@ impl DaemonApi for ClientApi {
         let id = client
             .begin_request(Method::Subscribe, json!({}), self.context(None, false))
             .await?;
-        let (sender, receiver) = mpsc::channel(EVENT_QUEUE);
-        tokio::spawn(async move {
-            let ending = loop {
-                // A replaced subscription drops its stream; stop at once instead of
-                // holding the connection until the next event fails to send.
-                let frame = tokio::select! {
-                    frame = client.next_frame() => frame,
-                    () = sender.closed() => return,
-                };
-                match frame {
-                    Ok(Frame::Control(Control::Event(event))) => {
-                        if sender.send(Ok(event)).await.is_err() {
-                            // The TUI dropped the stream; nobody is listening.
-                            return;
-                        }
-                    }
-                    // A terminal response ends the subscription; an error says why.
-                    Ok(Frame::Control(Control::Response(response))) if response.id == id => {
-                        match response.result {
-                            Outcome::Ok { .. } => return,
-                            Outcome::Error { error } => break ApiError::Rpc(error),
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => break ApiError::from(error),
-                }
-            };
-            if sender.send(Err(ending)).await.is_err() {
-                // The TUI dropped the stream first; there is nobody left to tell.
-            }
-        });
-        Ok(EventStream::new(receiver))
+        Ok(pump_events(client, id))
+    }
+
+    /// Calls `infra.logs` with `follow` on a dedicated connection; dropping the
+    /// stream closes it, which ends the daemon's `docker logs`.
+    async fn follow_container(
+        &self,
+        lane: String,
+        container: String,
+        tail: usize,
+    ) -> Result<EventStream, ApiError> {
+        let mut client = self.fresh().await?;
+        let params = json!({"container": container, "tail": tail, "follow": true, "styled": true});
+        let id = client
+            .begin_request(Method::InfraLogs, params, self.context(Some(lane), false))
+            .await?;
+        Ok(pump_events(client, id))
     }
 
     /// Calls `attach` on a dedicated connection; resize goes on the same

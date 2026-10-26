@@ -168,12 +168,12 @@ pub trait Reporter: Send + Sync {
         let task_output = method == Method::Run && event.event == devlanes_proto::events::LOG;
         if self.runtime().quiet
             || self.mode() == OutputMode::Agent
-                && !matches!(method, Method::Logs | Method::Subscribe)
+                && !matches!(method, Method::Logs | Method::InfraLogs | Method::Subscribe)
                 && !task_output
         {
             return Ok(Rendered::default());
         }
-        let stdout = if matches!(method, Method::Logs | Method::Run)
+        let stdout = if matches!(method, Method::Logs | Method::InfraLogs | Method::Run)
             && event.event == devlanes_proto::events::LOG
         {
             // Followed lines arrive as `{unit, line: LogLine}`; render the line itself.

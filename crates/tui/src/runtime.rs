@@ -634,6 +634,21 @@ impl Executor {
                     tokio::spawn(pump_attach(api, sender, generation, lane, params, input_rx));
                 self.attach = Some((task, input_tx));
             }
+            Effect::FollowContainer {
+                generation,
+                lane,
+                container,
+                tail,
+            } => {
+                self.detach();
+                // Held in the attach slot so any later attach or detach ends it;
+                // nothing is ever sent on the input side.
+                let (input_tx, _) = mpsc::channel(1);
+                let task = tokio::spawn(pump_container(
+                    api, sender, generation, lane, container, tail,
+                ));
+                self.attach = Some((task, input_tx));
+            }
             Effect::SettleResize { token, after_ms } => {
                 tokio::spawn(async move {
                     sleep(Duration::from_millis(after_ms)).await;
@@ -910,6 +925,68 @@ async fn pump_attach(
     deliver(&sender, Msg::AttachClosed { generation }).await;
 }
 
+/// Follows a container's Docker logs and writes each line to the pane's grid
+/// as a unit's output would arrive, so scrollback and copy work the same.
+async fn pump_container(
+    api: Arc<dyn DaemonApi>,
+    sender: mpsc::Sender<Msg>,
+    generation: u64,
+    lane: String,
+    container: String,
+    tail: usize,
+) {
+    let mut stream = match api.follow_container(lane, container, tail).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            let msg = Msg::ContainerLogsOpened {
+                generation,
+                result: Err(error),
+            };
+            deliver(&sender, msg).await;
+            return;
+        }
+    };
+    let opened = Msg::ContainerLogsOpened {
+        generation,
+        result: Ok(()),
+    };
+    if !deliver(&sender, opened).await {
+        return;
+    }
+    while let Some(item) = stream.next().await {
+        let msg = match item {
+            Ok(event) => match container_line(&event) {
+                Some(bytes) => Msg::AttachOutput { generation, bytes },
+                None => continue,
+            },
+            Err(error) => {
+                deliver(&sender, Msg::StreamError { generation, error }).await;
+                break;
+            }
+        };
+        if !deliver(&sender, msg).await {
+            return;
+        }
+    }
+    deliver(&sender, Msg::AttachClosed { generation }).await;
+}
+
+/// The bytes a `log` event adds to the grid: the line with its colors when
+/// the daemon kept them, then CR LF, since the grid is a terminal.
+fn container_line(event: &devlanes_proto::Event) -> Option<Vec<u8>> {
+    if event.event != devlanes_proto::events::LOG {
+        return None;
+    }
+    let line = event.data.get("line")?;
+    let text = line
+        .get("styled")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| line.get("text").and_then(serde_json::Value::as_str))?;
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.extend_from_slice(b"\r\n");
+    Some(bytes)
+}
+
 /// Hands a URL to the desktop's opener, or inside WSL to the Windows browser.
 #[cfg(unix)]
 fn open_url(url: &str) -> io::Result<()> {
@@ -977,5 +1054,31 @@ mod tests {
         // As text, the unit gets the character's UTF-8 bytes, not a control byte.
         let typed = terminal_msg(TermEvent::Key(key('@', ctrl_alt)));
         assert!(matches!(typed, Some(Msg::Key(k)) if k == key('@', KeyModifiers::NONE)));
+    }
+
+    #[test]
+    /// A container's `log` event becomes its colored line, else its plain
+    /// one, ending in CR LF; other events add nothing.
+    fn container_lines_end_in_crlf_and_keep_colors() {
+        let event = |name: &str, line: serde_json::Value| devlanes_proto::Event {
+            seq: 0,
+            event: name.into(),
+            data: serde_json::json!({"unit": "db", "line": line}),
+        };
+        let styled = event(
+            devlanes_proto::events::LOG,
+            serde_json::json!({"text": "ready", "styled": "\x1b[32mready\x1b[0m"}),
+        );
+        assert_eq!(
+            container_line(&styled).as_deref(),
+            Some(&b"\x1b[32mready\x1b[0m\r\n"[..])
+        );
+        let plain = event(
+            devlanes_proto::events::LOG,
+            serde_json::json!({"text": "ready"}),
+        );
+        assert_eq!(container_line(&plain).as_deref(), Some(&b"ready\r\n"[..]));
+        let other = event(devlanes_proto::events::DIAGNOSTIC, serde_json::json!({}));
+        assert_eq!(container_line(&other), None);
     }
 }

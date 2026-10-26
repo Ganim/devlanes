@@ -13,6 +13,7 @@ mod dns;
 mod engine;
 mod files;
 pub mod hosts;
+mod infra_logs;
 mod input;
 pub mod integrations;
 mod lifecycle;
@@ -722,6 +723,49 @@ async fn finish_tap(
     }
 }
 
+/// Error data kept in the daemon log for one failed request, so a run of
+/// candidates or stderr cannot flood it.
+const FAILURE_DATA_BYTES: usize = 1024;
+
+/// Logs a failed start, stop, run or other mutating request at `info`, with
+/// the error data as compact JSON. The daemon log runs at `info`, and the
+/// request span's `answered` is `debug`, so without this a failure the TUI
+/// showed and then cut left no trace there. Read-only requests stay out:
+/// clients poll some of them.
+fn log_failure(method: Method, lane: Option<&str>, error: &RpcError) {
+    // The `--yes` round trip and requests during shutdown are expected answers.
+    if matches!(
+        error.code.as_str(),
+        "confirmation_required" | "daemon_stopping"
+    ) {
+        return;
+    }
+    let method = serde_json::to_value(method)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let lane = lane
+        .or_else(|| error.data.get("lane").and_then(Value::as_str))
+        .unwrap_or("");
+    let data = failure_data(&error.data);
+    tracing::info!(method = %method, code = %error.code, lane, data = %data, "request failed");
+}
+
+/// `data` as compact JSON, cut at [`FAILURE_DATA_BYTES`] on a character
+/// boundary and marked with `…` when cut.
+fn failure_data(data: &Value) -> String {
+    let mut text = data.to_string();
+    if text.len() > FAILURE_DATA_BYTES {
+        let mut end = FAILURE_DATA_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push('…');
+    }
+    text
+}
+
 /// One bounded outgoing queue prevents slow terminals from consuming unbounded memory.
 async fn serve_client(
     stream: LocalStream,
@@ -815,6 +859,9 @@ async fn serve_client(
                                 let mut answering = None;
                                 let (span, tap) = request_span(&request, compatible, &session);
                                 let begun = Instant::now();
+                                // The request moves into the handler; a failure is logged with these.
+                                let logged = engine::mutating(&request.method)
+                                    .then(|| (request.method, request.context.lane.clone()));
                                 let result = async { match request.method {
                                     Method::DaemonStatus => {
                                         let mut status = json!({
@@ -861,6 +908,9 @@ async fn serve_client(
                                     error = result.as_ref().err().map(|error| error.code.as_str()),
                                     "answered"
                                 );
+                                if let (Some((method, lane)), Err(error)) = (&logged, &result) {
+                                    log_failure(*method, lane.as_deref(), error);
+                                }
                                 drop(span);
                                 if let Some((guard, forwarder)) = tap {
                                     finish_tap(guard, forwarder, &session).await;
@@ -892,6 +942,17 @@ async fn serve_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    /// Long error data is cut on a character boundary; short data stays whole.
+    fn failure_data_is_capped() {
+        let short = json!({"reference": "setup.db"});
+        assert_eq!(failure_data(&short), r#"{"reference":"setup.db"}"#);
+        let long = json!({"candidates": vec!["é".repeat(10); 200]});
+        let text = failure_data(&long);
+        assert!(text.ends_with('…'));
+        assert!(text.len() <= FAILURE_DATA_BYTES + '…'.len_utf8());
+    }
 
     /// The endpoint for `home`: a socket inside it, or on Windows a pipe named
     /// after its test directory, unique to the test.

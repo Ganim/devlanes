@@ -25,4 +25,4 @@ expression: screen(&buffer)
 "│                              ││            --project-directory               │"
 "│                              ││ … z shows the rest                           │"
 "└──────────────────────────────┘└──────────────────────────────────────────────┘"
-" s start   / filter                                       ? all keys   q quit   "
+" s start   e error details   / filter                     ? all keys   q quit   "

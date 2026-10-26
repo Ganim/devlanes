@@ -17,4 +17,4 @@ expression: draw(&app)?.backend()
 "│             └──────────────────────────────────────────────────┘led · 1 star…│"
 "│                              ││ … z shows the rest                           │"
 "└──────────────────────────────┘└──────────────────────────────────────────────┘"
-" s start lane   S start all   p start with profiles       ? all keys   q quit   "
+" s start lane   e error details   S start all             ? all keys   q quit   "

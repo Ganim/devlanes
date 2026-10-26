@@ -30,7 +30,10 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
                 "[ ]  1-9",
                 "previous, next lane; lane by its place in the bar",
             ),
-            ("n N", "next, previous problem"),
+            (
+                "n N  e",
+                "next, previous problem; every error in full (or click it)",
+            ),
             ("t  i", "jump to the tasks, the infra"),
             (
                 "s  x  r",
@@ -402,6 +405,53 @@ pub fn render(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
                 }
             };
             (format!("start {} with profiles", clean(lane)), body, tail)
+        }
+        Dialog::Errors(state) => {
+            let Some(entry) = app.errors.get(state.index) else {
+                return;
+            };
+            let width = max.min(100);
+            let mut text = Vec::new();
+            for (index, line) in entry.lines().iter().enumerate() {
+                let style = if index == 0 {
+                    theme.tone(Tone::Failure).add_modifier(Modifier::BOLD)
+                } else if line.starts_with("command: ") || line.starts_with("run: ") {
+                    theme.quiet()
+                } else {
+                    Style::new()
+                };
+                text.extend(wrapped(line, width, style));
+            }
+            // The keys take one row and the blank line before them another.
+            let room = rows.saturating_sub(2).max(1);
+            let max_scroll = text.len().saturating_sub(room);
+            state.max_scroll.set(max_scroll);
+            let scroll = state.scroll.min(max_scroll);
+            let mut pairs = Vec::new();
+            if app.errors.len() > 1 {
+                pairs.push(("h l", "older, newer"));
+            }
+            if max_scroll > 0 {
+                pairs.push(("j k", "scroll"));
+            }
+            pairs.extend([("y", "copy"), ("esc", "close")]);
+            let tail = vec![keys(theme, &pairs)];
+            let mut title = if app.errors.len() > 1 {
+                format!("error {} of {}", state.index + 1, app.errors.len())
+            } else {
+                "error".to_owned()
+            };
+            // Says there is more below, and how far down the view is.
+            if max_scroll > 0 {
+                let shown = (scroll + room).min(text.len());
+                title.push_str(&format!(
+                    " · lines {}-{shown} of {}",
+                    scroll + 1,
+                    text.len()
+                ));
+            }
+            let body = text.into_iter().skip(scroll).take(room).collect();
+            (title, body, tail)
         }
         Dialog::Help => {
             let first = first_section(app);

@@ -133,6 +133,40 @@ pub fn role(unit: &UnitSummary) -> Role {
     }
 }
 
+/// What `run` takes to run `unit` again: a task's name, or `infra.setup.<entry>`
+/// and `infra.teardown.<entry>` for a setup or teardown step; `None` for the rest.
+pub fn run_name(unit: &UnitSummary) -> Option<String> {
+    match role(unit) {
+        Role::Task => Some(unit.name.clone()),
+        Role::Setup | Role::Teardown => Some(format!("infra.{}", unit.name)),
+        Role::Service | Role::Exec => None,
+    }
+}
+
+/// The unit a `run` of `task` spawns: `setup.db` for `infra.setup.db`, the
+/// task's own name otherwise.
+pub fn run_unit(task: &str) -> &str {
+    if task.starts_with("infra.setup.") || task.starts_with("infra.teardown.") {
+        &task["infra.".len()..]
+    } else {
+        task
+    }
+}
+
+/// The name a row shows: a setup or teardown step drops its `setup.` or
+/// `teardown.` prefix, since the group above it says which it is.
+pub fn short_name(unit: &UnitSummary) -> &str {
+    let prefix = match role(unit) {
+        Role::Setup => "setup.",
+        Role::Teardown => "teardown.",
+        _ => return unit.label(),
+    };
+    if unit.display_name.is_some() {
+        return unit.label();
+    }
+    unit.name.strip_prefix(prefix).unwrap_or(&unit.name)
+}
+
 /// A unit that needs a look: failed, left running by an earlier daemon, or a
 /// task or service that exited with an error.
 pub fn is_problem(unit: &UnitSummary) -> bool {

@@ -717,7 +717,7 @@ impl LanePhase for SetupPhase {
                     return (name, Err(RpcError::new("not_found", json!({}), 3)));
                 };
                 let result = engine
-                    .run_command(&project, &lane, "setup", command, &actor, &cancel)
+                    .run_command(&project, &lane, "setup", command, &actor, &cancel, None)
                     .await;
                 (name, result)
             }
@@ -1081,6 +1081,10 @@ impl LanePhase for ServicesPhase {
 /// Exit of a task: its code (`None` when killed or timed out) and its last unit.
 pub(crate) struct TaskOutcome {
     pub code: Option<i32>,
+    /// The last unit's own exit code. It differs from `code` only for an infra
+    /// entry with `ignore_errors`, which counts a failure as done for starts
+    /// and steps; a `run` of that one entry reports what really happened.
+    pub raw_code: Option<i32>,
     pub host: Option<UnitHost>,
     /// Every unit of the task (steps included) that left processes behind.
     pub leftovers: Vec<Leftovers>,
@@ -1564,7 +1568,10 @@ impl Inner {
             .collect()
     }
 
-    /// Runs one `infra.setup`/`infra.teardown` entry to completion.
+    /// Runs one `infra.setup`/`infra.teardown` entry to completion; with a
+    /// `session` (`devlanes run infra.setup.<name>` in the foreground) its
+    /// output streams there as `log` events.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_command(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
@@ -1573,6 +1580,7 @@ impl Inner {
         command: &ResolvedCommand,
         actor: &Actor,
         cancel: &CancellationToken,
+        session: Option<&Session>,
     ) -> Result<(ExitOutcome, UnitHost), RpcError> {
         let extra = lane.st().setup_env.clone();
         let name = format!("{phase}.{}", command.name);
@@ -1584,7 +1592,14 @@ impl Inner {
             "setup"
         };
         let (host, _) = self.spawn_unit(project, lane, request).await?;
-        let outcome = finish(&host, command.timeout, cancel).await;
+        let outcome = match session {
+            Some(session) => {
+                let follower = stream_logs(host.clone(), session.clone());
+                let (exit, ()) = tokio::join!(finish(&host, command.timeout, cancel), follower);
+                exit
+            }
+            None => finish(&host, command.timeout, cancel).await,
+        };
         Ok((outcome, host))
     }
 
@@ -1653,6 +1668,7 @@ impl Inner {
             let result: Result<TaskOutcome, RpcError> = async {
                 let mut outcome = TaskOutcome {
                     code: Some(0),
+                    raw_code: Some(0),
                     host: None,
                     leftovers: Vec::new(),
                 };
@@ -1662,33 +1678,35 @@ impl Inner {
                         for step in &task.steps {
                             if cancel.is_cancelled() {
                                 outcome.code = None;
+                                outcome.raw_code = None;
                                 break;
                             }
-                            let step_outcome =
-                                if let Some(entry) = step.strip_prefix("infra.setup.") {
-                                    self.step_command(
-                                        project, lane, resolved, "setup", entry, actor, cancel,
-                                    )
-                                    .await?
-                                } else if let Some(entry) = step.strip_prefix("infra.teardown.") {
-                                    self.step_command(
-                                        project, lane, resolved, "teardown", entry, actor, cancel,
-                                    )
-                                    .await?
-                                } else {
-                                    self.run_task(
-                                        project,
-                                        lane,
-                                        resolved,
-                                        step,
-                                        "step",
-                                        actor,
-                                        session,
-                                        cancel,
-                                        depth + 1,
-                                    )
-                                    .await?
-                                };
+                            let step_outcome = if let Some(entry) =
+                                step.strip_prefix("infra.setup.")
+                            {
+                                self.step_command(
+                                    project, lane, resolved, "setup", entry, actor, cancel, None,
+                                )
+                                .await?
+                            } else if let Some(entry) = step.strip_prefix("infra.teardown.") {
+                                self.step_command(
+                                    project, lane, resolved, "teardown", entry, actor, cancel, None,
+                                )
+                                .await?
+                            } else {
+                                self.run_task(
+                                    project,
+                                    lane,
+                                    resolved,
+                                    step,
+                                    "step",
+                                    actor,
+                                    session,
+                                    cancel,
+                                    depth + 1,
+                                )
+                                .await?
+                            };
                             leftovers.extend(step_outcome.leftovers.iter().cloned());
                             if step_outcome.code != Some(0) {
                                 outcome = step_outcome;
@@ -1720,6 +1738,7 @@ impl Inner {
                         leftovers.extend(ended_leftovers(lane, name, &host));
                         outcome = TaskOutcome {
                             code: exit.code,
+                            raw_code: exit.code,
                             host: Some(host),
                             leftovers: Vec::new(),
                         };
@@ -1762,9 +1781,10 @@ impl Inner {
         self.task_event(reference, task, state, code, reason);
     }
 
-    /// Runs a setup/teardown entry as a task step and updates its done-record.
+    /// Runs a setup/teardown entry as a task step, or on its own through `run`,
+    /// and updates its done-record; `session` streams its output.
     #[allow(clippy::too_many_arguments)]
-    async fn step_command(
+    pub(crate) async fn step_command(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
         lane: &Arc<LaneRt>,
@@ -1773,6 +1793,7 @@ impl Inner {
         entry: &str,
         actor: &Actor,
         cancel: &CancellationToken,
+        session: Option<&Session>,
     ) -> Result<TaskOutcome, RpcError> {
         let commands = if phase == "setup" {
             &resolved.setup
@@ -1787,7 +1808,7 @@ impl Inner {
             )
         })?;
         let (outcome, host) = self
-            .run_command(project, lane, phase, command, actor, cancel)
+            .run_command(project, lane, phase, command, actor, cancel, session)
             .await?;
         // An interrupted entry did not do its work, whatever `ignore_errors` says.
         let ok = !cancel.is_cancelled() && (outcome.code == Some(0) || command.ignore_errors);
@@ -1810,6 +1831,7 @@ impl Inner {
             .collect();
         Ok(TaskOutcome {
             code: if ok { Some(0) } else { outcome.code },
+            raw_code: outcome.code,
             host: Some(host),
             leftovers,
         })
@@ -2800,7 +2822,7 @@ impl Inner {
             if let Ok(resolved) = self.resolve_full(project, lane).await {
                 for (name, command) in &resolved.teardown {
                     let result = self
-                        .run_command(project, lane, "teardown", command, &actor, &cancel)
+                        .run_command(project, lane, "teardown", command, &actor, &cancel, None)
                         .await;
                     teardown.push(match result {
                         Ok((outcome, _)) => json!({"entry": name, "exit_code": outcome.code, "ignored": command.ignore_errors}),
@@ -3094,8 +3116,16 @@ impl Inner {
     async fn containers_ready(&self, lane: &LaneRt, spec: &InfraSpec) -> Result<(), RpcError> {
         let mut env: EnvMap = lane.st().env.as_deref().cloned().unwrap_or_default();
         env.extend(spec.env.clone());
+        // `up` just listed every plain container here under its Docker name.
+        let dockers: BTreeMap<String, String> = lane
+            .st()
+            .infra_containers
+            .iter()
+            .map(|container| (container.name.clone(), container.docker.clone()))
+            .collect();
         let checks = spec.containers.iter().filter_map(|container| {
             let ready = container.ready.as_ref()?;
+            let docker = dockers.get(&container.name);
             let ports: Vec<(String, u16)> = container
                 .ports
                 .iter()
@@ -3106,12 +3136,30 @@ impl Inner {
                 .collect();
             let env = &env;
             Some(async move {
+                // A failed read counts as no output yet, so the check polls again.
                 let logs = || async {
-                    self.integ
-                        .infra
-                        .container_logs(spec, &container.name, 200)
-                        .await
-                        .unwrap_or_default()
+                    let Some(docker) = docker else {
+                        return Vec::new();
+                    };
+                    let options = crate::integrations::ContainerLogOptions {
+                        tail: Some(200),
+                        ..Default::default()
+                    };
+                    let Ok(mut stream) = self.integ.infra.container_logs(docker, options).await
+                    else {
+                        return Vec::new();
+                    };
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(chunk) => bytes.extend_from_slice(&chunk.bytes),
+                            Err(_) => return Vec::new(),
+                        }
+                    }
+                    String::from_utf8_lossy(&bytes)
+                        .lines()
+                        .map(str::to_owned)
+                        .collect()
                 };
                 #[cfg(unix)]
                 let check =

@@ -32,6 +32,7 @@ dunce.workspace = true
 futures-util.workspace = true
 globset = "0.4"
 indexmap = "2"
+jiff = "0.2"
 serde.workspace = true
 regex = "1"
 strip-ansi-escapes = "0.2"

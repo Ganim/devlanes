@@ -10,7 +10,7 @@
 │   ● api-search                               ││ 2026-│   h l               fold, unfold; h moves to the section                               │                                                      │
 │   ● api-catalog                              ││ 2026-│   enter  space      fold a section, or type into a running unit                        │                                                      │
 │   ● api-inventory                            ││ 2026-│   [ ]  1-9          previous, next lane; lane by its place in the bar                  │                                                      │
-│   ● api-notify                               ││ 2026-│   n N               next, previous problem                                             │                                                      │
+│   ● api-notify                               ││ 2026-│   n N  e            next, previous problem; every error in full (or click it)          │                                                      │
 │   ● api-reports                              ││ 2026-│   t  i              jump to the tasks, the infra                                       │                                                      │
 │   ● web-app                                  ││ 2026-│   s  x  r           start, stop, restart the selection; s runs a task                  │                                                      │
 │   ● web-admin                                ││ 2026-│   s  S              on the lane: its default services; every service                   │                                                      │

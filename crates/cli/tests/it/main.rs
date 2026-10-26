@@ -133,6 +133,10 @@ fn entire_command_inventory_builds_actions() {
         (&["infra", "up"], Some(Method::InfraUp)),
         (&["infra", "down"], Some(Method::InfraDown)),
         (&["infra", "status"], Some(Method::InfraStatus)),
+        (
+            &["infra", "logs", "db", "-f", "-n", "50", "--timeout", "2s"],
+            Some(Method::InfraLogs),
+        ),
         (&["remote", "sync"], Some(Method::SyncStatus)),
         (&["config", "check"], Some(Method::ConfigCheck)),
         (&["doctor"], Some(Method::Doctor)),
@@ -183,6 +187,23 @@ fn entire_command_inventory_builds_actions() {
 }
 
 #[test]
+fn infra_logs_sends_the_container_tail_and_follow() {
+    let params = |args: &[&str]| {
+        let cli = Cli::try_parse_from(args).expect("parses");
+        request(action(&cli, &runtime(&cli, OutputMode::Plain))).params
+    };
+    let plain = params(&["devlanes", "infra", "logs", "db"]);
+    assert_eq!(plain["container"], "db");
+    assert_eq!(plain["tail"], 200);
+    assert_eq!(plain["follow"], false);
+    let followed = params(&["devlanes", "infra", "logs", "db", "--follow", "--tail", "5"]);
+    assert_eq!(
+        (&followed["tail"], &followed["follow"]),
+        (&json!(5), &json!(true))
+    );
+}
+
+#[test]
 fn positional_lanes_and_hosts_do_not_collide_with_global_flags() {
     for (args, lane) in [
         (vec!["status", "--lane", "acme@2"], "acme@2"),
@@ -220,6 +241,7 @@ fn agent_mode_bounds_streams_and_terminals() {
     for args in [
         &["devlanes", "status", "--watch"][..],
         &["devlanes", "debug", "events", "-f"],
+        &["devlanes", "infra", "logs", "db", "-f"],
     ] {
         let error = agent(args).err().expect("refused");
         assert!(error.to_string().contains("--timeout"), "{error}");

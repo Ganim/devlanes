@@ -201,7 +201,7 @@ need --yes when no terminal can prompt.
 devlanes run [OPTIONS] [TASK]
 ```
 
-- `[TASK]`: Task to run, as named under tasks: in devlanes.yaml [default: pick from a list]
+- `[TASK]`: Task to run, as named under tasks: in devlanes.yaml, or one infra entry as infra.setup.NAME or infra.teardown.NAME [default: pick from a list]
 - `--list`: List the tasks and the script sources they use
 - `--detach`: Start the task in the background and return
 
@@ -495,6 +495,19 @@ Show the containers' health and ports
 ```text
 devlanes infra status [OPTIONS]
 ```
+
+### devlanes infra logs
+
+Print a container's Docker logs; replicas of a compose service are merged
+
+```text
+devlanes infra logs [OPTIONS] <CONTAINER>
+```
+
+- `<CONTAINER>`: Compose service or infra.containers name
+- `-n, --tail <N>`: Show the last N lines
+  Default: `200`.
+- `-f, --follow`: Keep streaming new lines, also across container restarts; agent mode requires --timeout
 
 ### devlanes config
 

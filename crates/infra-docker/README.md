@@ -52,7 +52,8 @@ async fn start_cerbos() -> Result<(), Error> {
 
 ## API
 
-- `DockerInfra`: `ensure`, `health`, `wait_healthy`, `list_managed`, `stop`, `remove_lane`, `events`, `project_events`.
+- `DockerInfra`: `ensure`, `health`, `wait_healthy`, `list_managed`, `stop`, `remove_lane`, `events`, `project_events`, `logs`.
+- `LogOptions` / `LogChunk`: a container's stdout and stderr as a stream of chunks, with optional tail, follow, since and timestamps.
 - `ContainerSpec`: an evaluated `infra.containers` entry with host ports already taken from the block.
 - `Ensured`: the action taken (`Created`, `Started`, `Adopted`, `Recreated`), the endpoint and the health.
 - `HealthEvent` / `map_event`: Docker container events mapped to lifecycle changes.

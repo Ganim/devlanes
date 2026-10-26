@@ -10,6 +10,7 @@ use devlanes_core::{
     ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopPolicy, TerminalSize, Unit,
     contrib::{Contributor, ScriptRunner},
 };
+use futures_util::stream::BoxStream;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -298,6 +299,28 @@ pub struct InfraContainer {
     pub state: Option<String>,
 }
 
+/// What [`InfraProvider::container_logs`] asks the engine for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContainerLogOptions {
+    /// The last N lines of stored output; `None` sends all of it.
+    pub tail: Option<usize>,
+    /// Keep the stream open for new output until the container stops.
+    pub follow: bool,
+    /// Only output from this Unix second on.
+    pub since: Option<i64>,
+    /// Prefix every line with its RFC 3339 nanosecond timestamp and a space, as
+    /// `docker logs --timestamps` does.
+    pub timestamps: bool,
+}
+
+/// Container output as the engine sent it. A line can span several chunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerLogChunk {
+    /// From stderr. A container with a TTY reports everything as stdout.
+    pub stderr: bool,
+    pub bytes: Bytes,
+}
+
 /// A container lifecycle change for the event bus.
 #[derive(Debug, Clone, Serialize)]
 pub struct InfraEvent {
@@ -350,13 +373,13 @@ pub trait InfraProvider: Send + Sync {
         spec: &InfraSpec,
         container: &str,
     ) -> Result<Option<String>, InfraError>;
-    /// The last `tail` log lines of the plain container `container`, for `ready: {log}`.
+    /// Output of the container `docker` ([`InfraContainer::docker`]), plain or compose,
+    /// for `ready: {log}` and `infra.logs`. Nothing is stored; the engine keeps the logs.
     async fn container_logs(
         &self,
-        _spec: &InfraSpec,
-        _container: &str,
-        _tail: usize,
-    ) -> Result<Vec<String>, InfraError> {
+        _docker: &str,
+        _options: ContainerLogOptions,
+    ) -> Result<BoxStream<'static, Result<ContainerLogChunk, InfraError>>, InfraError> {
         Err(InfraError::new(
             "not_supported_yet",
             "this infra provider cannot read container logs",

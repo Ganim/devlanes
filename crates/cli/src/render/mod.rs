@@ -188,7 +188,7 @@ pub(crate) fn result(method: Method, data: &Value, cx: &Ctx<'_>) -> Vec<String> 
         Method::Errors => lanes::errors(data, cx),
         Method::Why => lanes::why(data, cx),
         Method::Hosts => lanes::hosts(data, cx),
-        Method::Logs => other::logs(data, cx),
+        Method::Logs | Method::InfraLogs => other::logs(data, cx),
         Method::Run => other::run(data, cx),
         Method::TaskList => other::tasks(data, cx),
         Method::Env => other::env(data),

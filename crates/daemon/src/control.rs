@@ -3,6 +3,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     sync::Arc,
     time::Duration,
 };
@@ -12,17 +13,20 @@ use devlanes_core::{LaunchSpec, TerminalSize, ports::PortName};
 use devlanes_proto::{
     Context, ExecParams, Page, RpcError, RunParams, Selection, UnitSummary, events,
 };
+use devlanes_resolve::ResolvedLane;
 use devlanes_state::DesiredState;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     Session,
     engine::{Inner, LanePair, carries_env, confirmation, params, required},
-    lifecycle::{SpawnRequest, StartOptions},
-    model::{EnvMap, Kind, ProjectRt, lane_summary, lock, unit_summary},
+    lifecycle::{SpawnRequest, StartOptions, TaskOutcome},
+    model::{EnvMap, Kind, LaneRt, ProjectRt, lane_summary, lock, unit_summary},
     registry::{internal, store_error},
     stream::LaneEvents,
+    units::UnitHost,
 };
 
 /// `resume` parameters.
@@ -69,6 +73,74 @@ struct RunArgs {
     run: RunParams,
     #[serde(default)]
     timeout_ms: Option<u64>,
+}
+
+/// A `run` of one `infra.setup` or `infra.teardown` entry.
+struct InfraEntry {
+    /// `setup` or `teardown`.
+    phase: &'static str,
+    entry: String,
+    detach: bool,
+    timeout_ms: Option<u64>,
+}
+
+/// Splits `infra.setup.<entry>` or `infra.teardown.<entry>` into the phase and
+/// the entry; `None` for a task name.
+fn infra_entry(task: &str) -> Option<(&'static str, &str)> {
+    if let Some(entry) = task.strip_prefix("infra.setup.") {
+        return Some(("setup", entry));
+    }
+    task.strip_prefix("infra.teardown.")
+        .map(|entry| ("teardown", entry))
+}
+
+/// Waits until this run of `unit` is listed on the lane. The client attaches
+/// to it next, so an earlier run that ended does not count, or the client
+/// would attach to its finished screen. A run that could not start (its
+/// previous run still going) answers with its error.
+async fn await_spawn(
+    lane: &LaneRt,
+    unit: &str,
+    previous: Option<&UnitHost>,
+    outcome: &mut tokio::sync::oneshot::Receiver<Option<RpcError>>,
+) -> Result<(), RpcError> {
+    for _ in 0..100 {
+        let spawned = lane
+            .st()
+            .units
+            .get(unit)
+            .is_some_and(|rec| previous.is_none_or(|previous| !rec.host.same_run(previous)));
+        if spawned {
+            return Ok(());
+        }
+        match outcome.try_recv() {
+            Ok(Some(error)) => return Err(error),
+            Ok(None) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => return Ok(()),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
+
+/// The answer to a `run` that waited for its task or entry to end. An entry
+/// with `ignore_errors` still answers with its real exit code: it was run on
+/// its own, to see whether it works.
+fn run_result(task: &str, lane: &str, unit: Option<&str>, outcome: &TaskOutcome) -> Value {
+    let code = outcome.raw_code;
+    let mut result = json!({
+        "task": task,
+        "lane": lane,
+        "unit": unit,
+        "interactive": false,
+        "exit_code": code,
+        "state": if code == Some(0) { "exited" } else { "failed" },
+    });
+    // Daemons the task started (`pg_ctl start`) outlive it on purpose; say so.
+    if !outcome.leftovers.is_empty() {
+        result["leftovers"] = json!(outcome.leftovers);
+    }
+    result
 }
 
 impl Inner {
@@ -780,10 +852,22 @@ impl Inner {
             lane.st().env = Some(env.clone());
             project.st().last_env = Some(env);
         }
+        self.ensure_infra_env(&project, &lane).await;
         // `--env` applies to this run only; the lane keeps its own overrides.
         let resolved = self
             .resolve_task(&project, &lane, &run.task, &run.env)
             .await?;
+        if let Some((phase, entry)) = infra_entry(&run.task) {
+            let entry = InfraEntry {
+                phase,
+                entry: entry.to_owned(),
+                detach: run.detach,
+                timeout_ms: args.timeout_ms,
+            };
+            return self
+                .run_infra_entry(project, lane, resolved, entry, context, session)
+                .await;
+        }
         if let Some(error) = resolved.errors.get(&format!("tasks.{}", run.task)) {
             return Err(crate::resolve::resolve_error(error));
         }
@@ -842,29 +926,8 @@ impl Inner {
                     .await;
                 let _ = ended.send(result.err());
             });
-            // The client attaches to this unit, so this run of it must exist before
-            // we answer; an earlier run that ended does not count, or the client
-            // would attach to its finished screen. A run that could not start (its
-            // previous run still going) answers with its error.
             if let Some(unit) = &unit {
-                for _ in 0..100 {
-                    let spawned = lane.st().units.get(unit).is_some_and(|rec| {
-                        previous
-                            .as_ref()
-                            .is_none_or(|previous| !rec.host.same_run(previous))
-                    });
-                    if spawned {
-                        break;
-                    }
-                    match outcome.try_recv() {
-                        Ok(Some(error)) => return Err(error),
-                        Ok(None) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                            break;
-                        }
-                        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
+                await_spawn(&lane, unit, previous.as_ref(), &mut outcome).await?;
             }
             return Ok(json!({
                 "task": run.task,
@@ -874,12 +937,143 @@ impl Inner {
                 "detached": run.detach && !task.interactive,
             }));
         }
-        // The limit fires the task's token, so `run_task` itself stops the unit,
-        // finishes the row and emits the closing event before it returns. A clean
-        // or reset of the lane fires it too, then waits for `adhoc` to drop.
+        // `run_task` itself stops the unit, finishes the row and emits the closing
+        // event before it returns.
+        let (task_project, task_lane, task_resolved) = (&project, &lane, &resolved);
+        let (name, actor) = (&run.task, &context.actor);
+        let outcome = self
+            .run_limited(&lane, args.timeout_ms, &run.task, |cancel| async move {
+                self.run_task(
+                    task_project,
+                    task_lane,
+                    task_resolved,
+                    name,
+                    "manual",
+                    actor,
+                    Some(session),
+                    &cancel,
+                    0,
+                )
+                .await
+            })
+            .await?;
+        Ok(run_result(&run.task, &reference, unit.as_deref(), &outcome))
+    }
+
+    /// `run infra.setup.<entry>` or `run infra.teardown.<entry>`: one entry, as a
+    /// task step would run it, done-record included. Not a task, so no
+    /// `task_runs` row and no `task` events.
+    async fn run_infra_entry(
+        self: &Arc<Self>,
+        project: Arc<ProjectRt>,
+        lane: Arc<LaneRt>,
+        resolved: Arc<ResolvedLane>,
+        entry: InfraEntry,
+        context: &Context,
+        session: &Session,
+    ) -> Result<Value, RpcError> {
+        let task = format!("infra.{}.{}", entry.phase, entry.entry);
+        if let Some(error) = resolved.errors.get(&task) {
+            return Err(crate::resolve::resolve_error(error));
+        }
+        let commands = if entry.phase == "setup" {
+            &resolved.setup
+        } else {
+            &resolved.teardown
+        };
+        if !commands.contains_key(&entry.entry) {
+            // An unknown entry plans the whole lane, so these are all of them.
+            let candidates: Vec<String> = resolved
+                .setup
+                .keys()
+                .map(|name| format!("infra.setup.{name}"))
+                .chain(
+                    resolved
+                        .teardown
+                        .keys()
+                        .map(|name| format!("infra.teardown.{name}")),
+                )
+                .collect();
+            return Err(RpcError::new(
+                "not_found",
+                json!({"reference": task, "candidates": candidates}),
+                3,
+            ));
+        }
+        let reference = lane.st().reference(&project.name());
+        let unit = format!("{}.{}", entry.phase, entry.entry);
+        if entry.detach {
+            let previous = lane.st().units.get(&unit).map(|rec| rec.host.clone());
+            let engine = self.clone();
+            let actor = context.actor.clone();
+            let (step_project, step_lane) = (project.clone(), lane.clone());
+            // Ends with the daemon or a clean or reset of the lane; `stop` of the
+            // entry's unit ends it otherwise.
+            let (adhoc, cancel) = lane.enter_adhoc(&self.shutdown).await;
+            let (ended, mut outcome) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let _adhoc = adhoc;
+                let result = engine
+                    .step_command(
+                        &step_project,
+                        &step_lane,
+                        &resolved,
+                        entry.phase,
+                        &entry.entry,
+                        &actor,
+                        &cancel,
+                        None,
+                    )
+                    .await;
+                let _ = ended.send(result.err());
+            });
+            await_spawn(&lane, &unit, previous.as_ref(), &mut outcome).await?;
+            return Ok(json!({
+                "task": task,
+                "lane": reference,
+                "unit": unit,
+                "interactive": false,
+                "detached": true,
+            }));
+        }
+        let (step_project, step_lane, step_resolved) = (&project, &lane, &resolved);
+        let (phase, name, actor) = (entry.phase, &entry.entry, &context.actor);
+        let outcome = self
+            .run_limited(&lane, entry.timeout_ms, &task, |cancel| async move {
+                self.step_command(
+                    step_project,
+                    step_lane,
+                    step_resolved,
+                    phase,
+                    name,
+                    actor,
+                    &cancel,
+                    Some(session),
+                )
+                .await
+            })
+            .await?;
+        Ok(run_result(&task, &reference, Some(&unit), &outcome))
+    }
+
+    /// Runs `work` inside the lane's ad-hoc gate with the request's time limit,
+    /// which fires the token `work` gets: the run stops its unit before it
+    /// returns. A clean or reset of the lane fires the token too, then waits for
+    /// the gate.
+    async fn run_limited<F, Fut>(
+        &self,
+        lane: &LaneRt,
+        timeout_ms: Option<u64>,
+        task: &str,
+        work: F,
+    ) -> Result<TaskOutcome, RpcError>
+    where
+        F: FnOnce(CancellationToken) -> Fut,
+        Fut: Future<Output = Result<TaskOutcome, RpcError>>,
+    {
         let (adhoc, cancel) = lane.enter_adhoc(&self.shutdown).await;
         let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let timer = args.timeout_ms.map(|ms| {
+        let timer = timeout_ms.map(|ms| {
             let (cancel, expired) = (cancel.clone(), expired.clone());
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -887,19 +1081,7 @@ impl Inner {
                 cancel.cancel();
             })
         });
-        let outcome = self
-            .run_task(
-                &project,
-                &lane,
-                &resolved,
-                &run.task,
-                "manual",
-                &context.actor,
-                Some(session),
-                &cancel,
-                0,
-            )
-            .await;
+        let outcome = work(cancel).await;
         drop(adhoc);
         if let Some(timer) = timer {
             timer.abort();
@@ -909,22 +1091,9 @@ impl Inner {
         let succeeded = matches!(&outcome, Ok(outcome) if outcome.code == Some(0));
         let expired = expired.load(std::sync::atomic::Ordering::SeqCst);
         if expired && !self.shutdown.is_cancelled() && !succeeded {
-            return Err(RpcError::new("timeout", json!({"task": run.task}), 124));
+            return Err(RpcError::new("timeout", json!({"task": task}), 124));
         }
-        let outcome = outcome?;
-        let mut result = json!({
-            "task": run.task,
-            "lane": reference,
-            "unit": unit,
-            "interactive": false,
-            "exit_code": outcome.code,
-            "state": if outcome.code == Some(0) { "exited" } else { "failed" },
-        });
-        // Daemons the task started (`pg_ctl start`) outlive it on purpose; say so.
-        if !outcome.leftovers.is_empty() {
-            result["leftovers"] = json!(outcome.leftovers);
-        }
-        Ok(result)
+        outcome
     }
 
     /// `profile.list`: the profiles of the lane's config, for pickers. The lane's
@@ -1063,6 +1232,41 @@ impl Inner {
         self.bus
             .emit(events::RESYNC, json!({"reason": "reset_state"}));
         Ok(json!({"stopped": stopped, "terminated": terminated}))
+    }
+
+    /// Fills the lane's Compose env (`COMPOSE_PROJECT_NAME` and the rest) when
+    /// no start or `infra up` did since the daemon began: `run` reaches infra
+    /// entries on such a lane too, after a daemon restart for one. Starts
+    /// nothing; a lane without infra, or Docker being down, leaves it empty.
+    async fn ensure_infra_env(self: &Arc<Self>, project: &Arc<ProjectRt>, lane: &Arc<LaneRt>) {
+        if !lane.st().setup_env.is_empty() {
+            return;
+        }
+        let Ok(spec) = self.infra_spec(project, lane, &[]).await else {
+            return;
+        };
+        if spec.is_empty() {
+            return;
+        }
+        let needs = self.integ.infra.port_needs(&spec).await.unwrap_or_default();
+        let spec = match self.infra_spec(project, lane, &needs).await {
+            Ok(with_ports) => with_ports,
+            Err(_) => spec,
+        };
+        match self.integ.infra.namespace(&spec).await {
+            Ok(up) => {
+                // Only the env: the namespace and containers make status list
+                // the lane's infra as up, which nothing here checked.
+                let mut st = lane.st();
+                // A start that finished meanwhile knows better.
+                if st.setup_env.is_empty() {
+                    st.setup_env = up.setup_env;
+                }
+            }
+            Err(error) => {
+                tracing::debug!(code = %error.code, "infra env for a run unavailable");
+            }
+        }
     }
 
     /// Spec with ports for the request's lane, allocating infra ports first.

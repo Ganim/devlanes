@@ -105,6 +105,25 @@ fn docker_lanes_get_their_own_postgres_and_clean_drops_only_theirs() -> Result<(
     assert_eq!(sql(&lab, LANE_ZERO, "SELECT body FROM notes")?, "lane-zero");
     assert_eq!(sql(&lab, LANE_ONE, "SELECT body FROM notes")?, "lane-one");
 
+    // `infra logs` reads Docker's logs of a lane's own service and of a shared one.
+    for service in ["postgres", "redis"] {
+        let page = lab.json(
+            &feature,
+            &["infra", "logs", service, "--tail", "5", "--json"],
+        )?;
+        let items = page["items"].as_array().cloned().unwrap_or_default();
+        assert!(
+            !items.is_empty() && items.len() <= 5,
+            "{service} logs: {page}"
+        );
+        assert!(
+            items
+                .iter()
+                .all(|line| line["unit"] == service && line["timestamp_ms"].as_u64() > Some(0)),
+            "{service} logs: {page}"
+        );
+    }
+
     let zero_containers = containers(&lab, LANE_ZERO)?;
     let one_containers = containers(&lab, LANE_ONE)?;
     assert_eq!(zero_containers.len(), 1, "one Postgres in lane 0");

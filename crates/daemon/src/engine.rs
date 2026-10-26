@@ -296,7 +296,7 @@ pub(crate) fn reference_error(error: ReferenceError) -> RpcError {
 }
 
 /// Methods that change lanes, units, infra or state; refused once shutdown began.
-fn mutating(method: &Method) -> bool {
+pub(crate) fn mutating(method: &Method) -> bool {
     matches!(
         method,
         Method::DaemonResetState
@@ -442,6 +442,7 @@ impl Inner {
             Method::InfraUp => self.infra_up_method(&context).await,
             Method::InfraDown => self.infra_down_method(&context).await,
             Method::InfraStatus => self.infra_status_method(&context).await,
+            Method::InfraLogs => self.infra_logs_method(params, &context, &session).await,
             Method::Hosts => Ok(self.hosts()),
             Method::Env => self.env_method(params, &context).await,
             Method::Errors => self.errors_method(params, &context).await,

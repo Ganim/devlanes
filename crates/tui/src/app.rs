@@ -78,6 +78,8 @@ pub enum Click {
     StartLane(String),
     /// The problem counter in the top bar.
     FirstProblem,
+    /// The error in the top bar: the error list.
+    Errors,
     /// A key hint: the click presses the key.
     Key(KeyCode, KeyModifiers),
     /// A monitor table row.
@@ -296,6 +298,33 @@ impl ErrorEntry {
     pub fn verb(&self) -> &str {
         self.what.split(' ').next().unwrap_or("action")
     }
+
+    /// The whole error as plain lines, as the error list shows and copies it:
+    /// the headline, every detail line, then the failed command and the hint.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = vec![format!("{} failed: {}", self.what, self.worded.summary)];
+        lines.extend(self.worded.detail.iter().cloned());
+        if let Some(command) = &self.worded.command {
+            lines.push(format!("command: {command}"));
+        }
+        if let Some(hint) = &self.worded.hint {
+            lines.push(format!("run: {hint}"));
+        }
+        lines
+    }
+}
+
+/// The error list (`e`, or a click on the header's error): one error at a
+/// time, in full.
+#[derive(Debug, Default)]
+pub struct ErrorsDialog {
+    /// Into [`App::errors`], 0 the newest.
+    pub index: usize,
+    /// Wrapped lines scrolled past at the top.
+    pub scroll: usize,
+    /// The furthest `scroll` that still fills the box, as last drawn; only
+    /// the renderer knows the wrapped length.
+    pub max_scroll: std::cell::Cell<usize>,
 }
 
 /// Modal prompts; while one is open it receives every key.
@@ -329,6 +358,8 @@ pub enum Dialog {
     Targets(TargetPicker),
     /// The first launch in a home (`crate::welcome`).
     Welcome(crate::welcome::Welcome),
+    /// Every error this TUI kept, one at a time in full.
+    Errors(ErrorsDialog),
 }
 
 /// The `T` picker: every target of the kept log lines with its count and
@@ -453,6 +484,9 @@ pub struct Attached {
     /// the daemon's redraw at the new size, never through a locally cut grid
     /// or a blank one.
     pub held: Option<vt100::Screen>,
+    /// `unit` names an infra container and the screen shows its Docker logs:
+    /// nothing to type into and no stored history behind the scrollback.
+    pub container: bool,
 }
 
 impl Attached {
@@ -467,6 +501,9 @@ impl Attached {
 pub const MIN_PTY: (u16, u16) = (20, 5);
 /// A resize settles this long before the stream is reopened for a fresh screen.
 const RESIZE_SETTLE_MS: u64 = 200;
+/// Lines of a container's Docker log shown when it is selected; older ones
+/// stay with Docker (`docker logs`). Half the pane's scrollback.
+const CONTAINER_TAIL: usize = 1000;
 
 /// Inputs to [`App::update`].
 #[derive(Debug)]
@@ -496,6 +533,12 @@ pub enum Msg {
     AttachOpened {
         generation: u64,
         result: Result<AttachResult, ApiError>,
+    },
+    /// [`Effect::FollowContainer`] got its stream, or why not. Its lines then
+    /// arrive as [`Msg::AttachOutput`], its end as [`Msg::AttachClosed`].
+    ContainerLogsOpened {
+        generation: u64,
+        result: Result<(), ApiError>,
     },
     AttachOutput {
         generation: u64,
@@ -602,6 +645,15 @@ pub enum Effect {
         columns: u16,
         rows: u16,
         interactive: bool,
+    },
+    /// Follows the Docker logs of infra container `container` as seen from
+    /// `lane`, replacing any attached stream: its last `tail` lines, then new
+    /// ones, written into the pane like a unit's output.
+    FollowContainer {
+        generation: u64,
+        lane: String,
+        container: String,
+        tail: usize,
     },
     /// Sends [`Msg::ResizeSettled`] with `token` after a short pause.
     SettleResize {
@@ -1292,6 +1344,24 @@ impl App {
                     }
                 }
             }
+            Msg::ContainerLogsOpened { generation, result } => match result {
+                Ok(()) => {
+                    if let Some(attached) = self.attached_mut(generation) {
+                        attached.state = AttachState::Live;
+                    }
+                }
+                Err(error) => self.container_failed(generation, error),
+            },
+            // The daemon answers `infra.logs` only when the stream ends, so its
+            // refusals (an older daemon, an unknown container) arrive here.
+            Msg::StreamError { generation, error }
+                if self
+                    .attached
+                    .as_ref()
+                    .is_some_and(|a| a.generation == generation && a.container) =>
+            {
+                self.container_failed(generation, error);
+            }
             Msg::StreamError { generation, error } => {
                 // A lost connection is reported once by the subscription, and an
                 // intentional daemon stop or restart is not an error at all.
@@ -1651,6 +1721,10 @@ impl App {
         }
         self.errors.push_front(entry);
         self.errors.truncate(MAX_ERRORS);
+        // The error being read stays on screen; the title's count shows the new one.
+        if let Some(Dialog::Errors(state)) = self.dialog.as_mut() {
+            state.index = (state.index + 1).min(self.errors.len() - 1);
+        }
     }
 
     /// The last failed action on a lane or unit, while it still applies.
@@ -1666,11 +1740,29 @@ impl App {
             .find(|lane| lane.reference == target_lane(target))?;
         match target {
             Target::Lane(_) => Some(lane.state.clone()),
-            Target::Unit { unit, .. } => lane
+            Target::Unit {
+                lane: reference,
+                unit,
+            } => lane
                 .units
                 .iter()
                 .find(|u| u.name == *unit)
-                .map(|u| u.state.clone()),
+                .map(|u| u.state.clone())
+                .or_else(|| {
+                    // A listed task that has not run since the daemon started has
+                    // no unit, but its row is still there to carry the error.
+                    self.task_info(reference, unit).map(|task| {
+                        task.last_run
+                            .as_ref()
+                            .map_or_else(|| "not run".to_owned(), |run| run.state.clone())
+                    })
+                })
+                .or_else(|| {
+                    // The list reloads after a config edit, often the fix for the
+                    // error itself; until it is back the task may still exist.
+                    matches!(self.tasks.get(reference), Some(Tasks::Loading))
+                        .then(|| "loading".to_owned())
+                }),
         }
     }
 
@@ -1847,7 +1939,7 @@ impl App {
                 let is_attached = self
                     .attached
                     .as_ref()
-                    .is_some_and(|a| a.lane == unit.lane && a.unit == unit.name);
+                    .is_some_and(|a| a.lane == unit.lane && a.unit == unit.name && !a.container);
                 match lane.units.iter_mut().find(|u| u.name == unit.name) {
                     Some(existing) => *existing = unit,
                     None => {
@@ -2624,20 +2716,26 @@ impl App {
 
     // ---- attach -----------------------------------------------------------
 
-    /// Attaches to the selected unit and detaches from anything else. An
-    /// orphaned unit has no stream; the pane explains it instead.
+    /// Attaches to the selected unit, or follows the selected container's
+    /// logs, and detaches from anything else. An orphaned unit has no stream;
+    /// the pane explains it instead.
     fn sync_attach(&mut self, effects: &mut Vec<Effect>) {
         let lane = self.selected.as_ref().map(|s| s.lane.clone());
+        let container = match self.selected_id() {
+            Some(RowId::Container(name)) => Some(name.clone()),
+            _ => None,
+        };
         let wanted = self
             .selected_unit()
             .filter(|unit| !is_orphaned(unit))
-            .map(|unit| unit.name.clone())
+            .map(|unit| (unit.name.clone(), false))
+            .or(container.map(|name| (name, true)))
             .zip(lane)
-            .map(|(unit, lane)| (lane, unit));
+            .map(|((name, container), lane)| (lane, name, container));
         let current = self
             .attached
             .as_ref()
-            .map(|a| (a.lane.clone(), a.unit.clone()));
+            .map(|a| (a.lane.clone(), a.unit.clone(), a.container));
         if wanted == current {
             return;
         }
@@ -2646,11 +2744,72 @@ impl App {
         }
         self.focus = Focus::List;
         self.want_terminal = false;
-        let Some((lane, unit)) = wanted else {
+        let Some((lane, name, container)) = wanted else {
             return;
         };
-        // Browsing only watches; focusing the pane or zooming takes the size.
-        self.open_attach(lane, unit, false, effects);
+        if container {
+            self.open_container(lane, name, effects);
+        } else {
+            // Browsing only watches; focusing the pane or zooming takes the size.
+            self.open_attach(lane, name, false, effects);
+        }
+    }
+
+    /// A container's log stream could not open or broke off: the pane shows
+    /// why in place of the logs. A daemon too old for `infra.logs` is no
+    /// failure to report, nor is a lost connection, which the subscription
+    /// reports once.
+    fn container_failed(&mut self, generation: u64, error: ApiError) {
+        let expected = error.is_disconnect() || self.daemon.stopped || self.daemon.busy.is_some();
+        let Some(attached) = self.attached_mut(generation) else {
+            return;
+        };
+        let mut worded = words::api(&error);
+        let old = matches!(
+            worded.code.as_deref(),
+            Some("unknown_method" | "unsupported_method")
+        );
+        if old {
+            worded.summary =
+                "this daemon cannot show container logs; restart it after upgrading devlanes"
+                    .into();
+        }
+        let what = format!(
+            "follow logs of container {} in {}",
+            attached.unit, attached.lane
+        );
+        attached.held = None;
+        attached.state = AttachState::Failed(worded.clone());
+        if !old && !expected {
+            self.report(&what, None, worded);
+        }
+    }
+
+    /// Follows the Docker logs of infra container `name`, replacing the
+    /// current stream. The grid is the pane's size, as a unit's would be.
+    fn open_container(&mut self, lane: String, name: String, effects: &mut Vec<Effect>) {
+        if self.attached.take().is_some() {
+            effects.push(Effect::Detach);
+        }
+        let (columns, rows) = self.attach_size();
+        self.generation += 1;
+        self.attached = Some(Attached {
+            generation: self.generation,
+            lane: lane.clone(),
+            unit: name.clone(),
+            state: AttachState::Opening,
+            screen: TerminalScreen::new(rows, columns),
+            mode: PaneMode::Live,
+            interactive: false,
+            held: None,
+            container: true,
+        });
+        effects.push(Effect::FollowContainer {
+            generation: self.generation,
+            lane,
+            container: name,
+            tail: CONTAINER_TAIL,
+        });
     }
 
     /// Opens a new stream on `lane:unit`, replacing the current one.
@@ -2675,6 +2834,7 @@ impl App {
             mode: PaneMode::Live,
             interactive,
             held: None,
+            container: false,
         });
         effects.push(Effect::Attach {
             generation: self.generation,
@@ -2702,10 +2862,16 @@ impl App {
             return;
         };
         let (lane, unit) = (attached.lane.clone(), attached.unit.clone());
+        let container = attached.container;
         let held = attached.held.take().or_else(|| {
             matches!(attached.mode, PaneMode::Live).then(|| attached.screen.screen().clone())
         });
-        self.open_attach(lane, unit, interactive, effects);
+        // A container's logs are read-only: a reopen only redraws them at the new size.
+        if container {
+            self.open_container(lane, unit, effects);
+        } else {
+            self.open_attach(lane, unit, interactive, effects);
+        }
         if let Some(attached) = self.attached.as_mut() {
             attached.held = held;
         }
@@ -3197,6 +3363,10 @@ impl App {
             self.set_notice(notice);
             return;
         };
+        if attached.container {
+            self.set_notice("container logs are read-only: docker exec types into it".into());
+            return;
+        }
         match (&attached.state, attached.interactive) {
             (AttachState::Live, true) => self.focus = Focus::Terminal,
             (AttachState::Live | AttachState::Opening, false) => {
@@ -3626,6 +3796,7 @@ impl App {
                 }
             }
             KeyCode::Char('o') => self.open_url(effects),
+            KeyCode::Char('e') => self.open_errors(),
             KeyCode::Char('c') => self.enter_copy(),
             KeyCode::PageUp => {
                 let page = self.page();
@@ -3661,8 +3832,8 @@ impl App {
         };
         if matches!(id, RowId::Section(_) | RowId::Group(..)) {
             self.toggle_fold(&id, effects);
-        } else if self.selected_unit().is_some() {
-            // A unit that does not run says why in a notice.
+        } else if self.selected_unit().is_some() || matches!(id, RowId::Container(_)) {
+            // A unit that does not run, or a container, says why in a notice.
             self.focus_terminal(effects);
         }
     }
@@ -3761,7 +3932,53 @@ impl App {
                 let action = welcome.key(key);
                 self.welcome_action(action, welcome, effects);
             }
+            Dialog::Errors(state) => self.errors_key(key, state, effects),
         }
+    }
+
+    /// Opens the error list on the newest error.
+    fn open_errors(&mut self) {
+        if self.errors.is_empty() {
+            self.set_notice("no errors since this TUI started".into());
+            return;
+        }
+        self.dialog = Some(Dialog::Errors(ErrorsDialog::default()));
+    }
+
+    /// Keys in the error list: h and l step through the errors, j and k
+    /// scroll a long one, y copies it.
+    fn errors_key(&mut self, key: KeyEvent, mut state: ErrorsDialog, effects: &mut Vec<Effect>) {
+        let last = self.errors.len().saturating_sub(1);
+        let max = state.max_scroll.get();
+        // The box may have grown since the scroll was set.
+        state.scroll = state.scroll.min(max);
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q' | 'e') => return,
+            KeyCode::Left | KeyCode::Char('h') if state.index < last => {
+                state.index += 1;
+                state.scroll = 0;
+            }
+            KeyCode::Right | KeyCode::Char('l') if state.index > 0 => {
+                state.index -= 1;
+                state.scroll = 0;
+            }
+            KeyCode::Down | KeyCode::Char('j') => state.scroll = (state.scroll + 1).min(max),
+            KeyCode::Up | KeyCode::Char('k') => state.scroll = state.scroll.saturating_sub(1),
+            KeyCode::PageDown => state.scroll = (state.scroll + 10).min(max),
+            KeyCode::PageUp => state.scroll = state.scroll.saturating_sub(10),
+            KeyCode::Char('y') => {
+                if let Some(entry) = self.errors.get(state.index) {
+                    effects.push(Effect::Copy(entry.lines().join("\n")));
+                    // OSC 52 has no reply: the terminal may ignore it silently.
+                    self.set_notice(
+                        "copied with OSC 52; it reaches the clipboard if the terminal allows that"
+                            .into(),
+                    );
+                }
+            }
+            _ => {}
+        }
+        self.dialog = Some(Dialog::Errors(state));
     }
 
     /// Opens the welcome once the first status and the dismissed notices are
@@ -4210,27 +4427,26 @@ impl App {
             return;
         };
         let verb = method_verb(method);
+        // `(unit, what run takes)`: a setup step's unit `setup.db` runs as `infra.setup.db`.
         let task = match &row {
-            RowId::Task(name) => Some(name.clone()),
-            RowId::Unit(name)
-                if lane
-                    .units
-                    .iter()
-                    .any(|u| u.name == *name && tree::role(u) == tree::Role::Task) =>
-            {
-                Some(name.clone())
-            }
+            RowId::Task(name) => Some((name.clone(), name.clone())),
+            RowId::Unit(name) => lane
+                .units
+                .iter()
+                .find(|u| u.name == *name)
+                .and_then(tree::run_name)
+                .map(|run| (name.clone(), run)),
             _ => None,
         };
-        if let Some(task) = task {
+        if let Some((unit, task)) = task {
             let running = lane
                 .units
                 .iter()
-                .any(|u| u.name == task && is_active(&u.state));
+                .any(|u| u.name == unit && is_active(&u.state));
             match method {
                 Method::Stop if running => {}
                 Method::Stop => {
-                    self.set_notice(format!("{task} is not running"));
+                    self.set_notice(format!("{unit} is not running"));
                     return;
                 }
                 _ => {
@@ -4342,9 +4558,12 @@ impl App {
     /// Runs a task; asks first only when its config sets `confirm`, as
     /// `devlanes run` does.
     fn run_task(&mut self, lane: String, task: String, effects: &mut Vec<Effect>) {
-        let confirm = self
-            .task_info(&lane, &task)
-            .is_some_and(|info| info.confirm);
+        // Teardown entries undo setup (drop a database, a bucket) on one key.
+        let teardown = task.starts_with("infra.teardown.");
+        let confirm = teardown
+            || self
+                .task_info(&lane, &task)
+                .is_some_and(|info| info.confirm);
         let effect = Effect::Run {
             lane: lane.clone(),
             params: RunParams {
@@ -4361,7 +4580,11 @@ impl App {
             self.dialog = Some(Dialog::Confirm {
                 title: format!("run {task}"),
                 prompt: format!("Run {task} in {lane}?"),
-                detail: vec!["Its config asks for a confirmation first.".into()],
+                detail: vec![if teardown {
+                    "Teardown entries undo what setup made, such as the lane's database.".into()
+                } else {
+                    "Its config asks for a confirmation first.".into()
+                }],
                 action: "run",
                 strict: false,
                 effect: Box::new(effect),
@@ -4381,15 +4604,16 @@ impl App {
         effects: &mut Vec<Effect>,
     ) {
         self.pending_end(&lane);
+        let unit = tree::run_unit(&task).to_owned();
         let target = Target::Unit {
             lane: lane.clone(),
-            unit: task.clone(),
+            unit: unit.clone(),
         };
         match result {
             Ok(value) => {
                 self.target_errors.remove(&target);
                 self.set_notice(format!("started {task} in {lane}"));
-                self.select(Selected::unit(&lane, &task), effects);
+                self.select(Selected::unit(&lane, &unit), effects);
                 let interactive = value.get("interactive").and_then(Value::as_bool) == Some(true);
                 if interactive {
                     // Reopens the task's stream as interactive; focus follows once it is live.
@@ -4397,8 +4621,15 @@ impl App {
                 }
             }
             Err(error) => {
-                // A task that is not listed as a unit attaches its error to the lane.
-                let target = if self.target_state(&target).is_some() {
+                // A task with a row (a unit, or one `task.list` names) keeps its
+                // error there; any other attaches it to the lane.
+                let listed = self
+                    .lanes
+                    .iter()
+                    .find(|l| l.reference == lane)
+                    .is_some_and(|l| l.units.iter().any(|u| u.name == unit))
+                    || self.task_info(&lane, &unit).is_some();
+                let target = if listed {
                     target
                 } else {
                     Target::Lane(lane.clone())
@@ -4472,7 +4703,11 @@ impl App {
         match &mut attached.mode {
             PaneMode::Copy(_) => {}
             PaneMode::Live => {
-                if attached.screen.scroll_by(delta) && attached.state != AttachState::Opening {
+                // A container's older lines stay with Docker; devlanes stores none.
+                if attached.screen.scroll_by(delta)
+                    && attached.state != AttachState::Opening
+                    && !attached.container
+                {
                     attached.mode = PaneMode::Logs(LogView {
                         loading: true,
                         ..LogView::default()
@@ -4553,6 +4788,11 @@ impl App {
             self.set_notice("select a unit with output first".into());
             return;
         };
+        // The pane shows the container's facts then, not a grid to select in.
+        if attached.container && matches!(attached.state, AttachState::Failed(_)) {
+            self.set_notice("no logs to select: the pane says why".into());
+            return;
+        }
         let (rows, _) = attached.screen.size();
         attached.mode = PaneMode::Copy(CopyState {
             cursor: (rows.saturating_sub(1), 0),
@@ -4645,6 +4885,15 @@ impl App {
                 return;
             }
             other => self.dialog = other,
+        }
+        if let Some(Dialog::Errors(state)) = self.dialog.as_mut() {
+            let max = state.max_scroll.get();
+            state.scroll = state.scroll.min(max);
+            match mouse.kind {
+                MouseEventKind::ScrollDown => state.scroll = (state.scroll + 3).min(max),
+                MouseEventKind::ScrollUp => state.scroll = state.scroll.saturating_sub(3),
+                _ => {}
+            }
         }
         if self.dialog.is_some() {
             // A click outside a dialog closes it; nothing it guards happens.
@@ -4827,6 +5076,7 @@ impl App {
                     self.select(first, effects);
                 }
             }
+            Click::Errors => self.open_errors(),
             Click::Key(code, modifiers) => self.key(KeyEvent::new(code, modifiers), effects),
             Click::MonitorRow(id) => {
                 // A second click on the selected row is Enter: open or fold it.
@@ -5179,7 +5429,8 @@ impl App {
 
     /// The listed state of the attached unit.
     pub fn attached_unit(&self) -> Option<&UnitSummary> {
-        let attached = self.attached.as_ref()?;
+        // A container may share its name with a unit; its stream is not that unit's.
+        let attached = self.attached.as_ref().filter(|a| !a.container)?;
         self.lanes
             .iter()
             .find(|lane| lane.reference == attached.lane)?

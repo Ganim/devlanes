@@ -363,7 +363,7 @@ pub struct LogArgs {
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Task to run, as named under tasks: in devlanes.yaml [default: pick from a list]
+    /// Task to run, as named under tasks: in devlanes.yaml, or one infra entry as infra.setup.NAME or infra.teardown.NAME [default: pick from a list]
     #[arg(conflicts_with = "list", value_name = "TASK")]
     pub task: Option<String>,
     /// List the tasks and the script sources they use
@@ -612,6 +612,18 @@ pub enum InfraCommand {
     Down,
     /// Show the containers' health and ports
     Status,
+    /// Print a container's Docker logs; replicas of a compose service are merged
+    Logs {
+        /// Compose service or infra.containers name
+        #[arg(value_name = "CONTAINER")]
+        container: String,
+        /// Show the last N lines
+        #[arg(short = 'n', long, value_name = "N", default_value_t = 200)]
+        tail: usize,
+        /// Keep streaming new lines, also across container restarts; agent mode requires --timeout
+        #[arg(short, long)]
+        follow: bool,
+    },
 }
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
@@ -971,14 +983,33 @@ impl Cli {
                 }
                 LaneCommand::Gc => (Method::LaneGc, json!({})),
             },
-            Some(Command::Infra { command }) => (
-                match command {
-                    InfraCommand::Up => Method::InfraUp,
-                    InfraCommand::Down => Method::InfraDown,
-                    InfraCommand::Status => Method::InfraStatus,
-                },
-                json!({}),
-            ),
+            Some(Command::Infra { command }) => match command {
+                InfraCommand::Up => (Method::InfraUp, json!({})),
+                InfraCommand::Down => (Method::InfraDown, json!({})),
+                InfraCommand::Status => (Method::InfraStatus, json!({})),
+                InfraCommand::Logs {
+                    container,
+                    tail,
+                    follow,
+                } => {
+                    if runtime.mode == OutputMode::Agent && *follow && self.timeout.is_none() {
+                        return Err(Error::Usage(
+                            "agent infra logs --follow requires --timeout (for example --timeout 30s)"
+                                .into(),
+                        ));
+                    }
+                    (
+                        Method::InfraLogs,
+                        serde_json::to_value(devlanes_proto::InfraLogsParams {
+                            container: container.clone(),
+                            tail: Some(*tail),
+                            follow: *follow,
+                            // Colors come along only where they are shown.
+                            styled: runtime.color,
+                        })?,
+                    )
+                }
+            },
             Some(Command::Config { .. }) => (Method::ConfigCheck, json!({})),
             Some(Command::Doctor) => (Method::Doctor, json!({})),
             Some(Command::Certs { command }) => match command {
@@ -1193,6 +1224,12 @@ impl Cli {
             )
         ) || matches!(&self.command, Some(Command::Run(args)) if !args.list && !args.detach)
             || matches!(&self.command, Some(Command::Logs(args)) if args.follow)
+            || matches!(
+                &self.command,
+                Some(Command::Infra {
+                    command: InfraCommand::Logs { follow: true, .. }
+                })
+            )
             || matches!(&self.command, Some(Command::Status(args)) if args.watch)
     }
 }

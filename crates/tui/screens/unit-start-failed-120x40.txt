@@ -37,7 +37,7 @@
 │   ⠋ ml-embed                        starting ││ 2026-10-21T10:42:31Z INFO job done queue=default id=job_8133 took=209│
 │   ● cache-warm                               ││ ms                                                                   │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
- r restart   n next problem   pgup scroll back   c select text   / filter                         ? all keys   q quit
+ r restart   e error details   n next problem   pgup scroll back   c select text   / filter       ? all keys   q quit
 
 --- styles (row: columns style) ---
 0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 41-96 red, 99 bold, 100-107 dim, 111 bold, 112-118 dim
@@ -79,4 +79,4 @@
 36: 0 darkgray, 6-13 green, 47-48 darkgray, 50-69 dim, 71-74 color2, 119 darkgray
 37: 0 darkgray, 4-5 green, 6-15 dim blue, 47-48 darkgray, 119 darkgray
 38: 0-119 darkgray
-39: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-64 dim, 65 bold, 66-75 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim
+39: 1 bold, 2-12 dim, 13 bold, 14-30 dim, 31 bold, 32-47 dim, 48-51 bold, 52-66 dim, 67 bold, 68-82 dim, 83 bold, 84-93 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

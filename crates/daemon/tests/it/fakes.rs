@@ -32,12 +32,25 @@ use devlanes_core::{
     StopSignal, TerminalSize, Unit,
 };
 use devlanes_daemon::integrations::{
-    ExitDetails, InfraContainer, InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec,
-    InfraUp, ManagedUnit, PortScope, ProcessTable, UnitRunner,
+    ContainerLogChunk, ContainerLogOptions, ExitDetails, InfraContainer, InfraError, InfraEvent,
+    InfraPortNeed, InfraProvider, InfraSpec, InfraUp, ManagedUnit, PortScope, ProcessTable,
+    UnitRunner,
 };
 use devlanes_proto::{LeftProcess, PhaseContainer};
+use futures_util::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
+
+/// The Docker-style timestamp of the fake infra's log line `n`: one second apart
+/// from 2026-01-01T00:00:00Z.
+pub fn fake_timestamp(n: usize) -> String {
+    format!(
+        "2026-01-01T{:02}:{:02}:{:02}.000000000Z",
+        n / 3600 % 24,
+        n / 60 % 60,
+        n % 60
+    )
+}
 
 /// The Linux number a fake unit reports as its exit signal after a stop.
 fn signal_number(signal: StopSignal) -> i32 {
@@ -477,6 +490,10 @@ impl ProcessTable for FakeProcesses {
     }
 }
 
+/// A line pushed to following log streams with its index in the log; `None`
+/// ends them.
+type LiveLine = Option<(usize, String)>;
+
 /// Infra provider recording calls; one per-lane port `db/5432`.
 #[derive(Default, Clone)]
 pub struct FakeInfra {
@@ -485,8 +502,15 @@ pub struct FakeInfra {
     pub started_at: Arc<Mutex<Option<String>>>,
     /// When set, `up` fails with this error.
     pub fail_up: Arc<Mutex<Option<InfraError>>>,
-    /// Lines every container's log holds.
+    /// Lines every container's log holds. Line `n` is stamped [`fake_timestamp`]`(n)`.
     pub logs: Arc<Mutex<Vec<String>>>,
+    /// `<docker> tail=<tail> follow=<follow>` for every `container_logs` call.
+    pub log_requests: Journal,
+    /// Replicas of the lane's `db` service; 0 and 1 both mean one container.
+    pub db_replicas: Arc<Mutex<usize>>,
+    /// New lines for following streams ([`FakeInfra::push_log`]); `None` ends
+    /// them, as Docker does when the container stops.
+    live: Arc<std::sync::OnceLock<broadcast::Sender<LiveLine>>>,
     /// Snapshots `progress` hands out in turn, the last one for good. While
     /// any is left, `up` waits until the last was handed out.
     pub progress: Arc<Mutex<std::collections::VecDeque<Vec<PhaseContainer>>>>,
@@ -506,6 +530,25 @@ impl FakeInfra {
     fn sender(&self) -> &broadcast::Sender<InfraEvent> {
         self.events.get_or_init(|| broadcast::channel(16).0)
     }
+
+    /// The live log channel, made on first use.
+    fn live(&self) -> &broadcast::Sender<LiveLine> {
+        self.live.get_or_init(|| broadcast::channel(64).0)
+    }
+
+    /// Appends a line to every container's log and sends it to following streams.
+    pub fn push_log(&self, line: &str) {
+        let Ok(mut logs) = self.logs.lock() else {
+            return;
+        };
+        logs.push(line.to_owned());
+        let _ = self.live().send(Some((logs.len() - 1, line.to_owned())));
+    }
+
+    /// Ends every following stream, like a container that stopped.
+    pub fn end_logs(&self) {
+        let _ = self.live().send(None);
+    }
     /// Records a call.
     fn record(&self, call: String) {
         if let Ok(mut calls) = self.calls.0.lock() {
@@ -519,22 +562,25 @@ impl FakeInfra {
         json!({"db": {"port": port, "ports": {"5432": port}}, "cache": {"port": 6379, "ports": {"6379": 6379}}})
     }
 
-    /// The lane's `db` container and a shared `cache`, named like compose would.
-    fn containers(spec: &InfraSpec) -> Vec<InfraContainer> {
-        vec![
-            InfraContainer {
+    /// The lane's `db` container (one per replica) and a shared `cache`, named
+    /// like compose would.
+    fn containers(&self, spec: &InfraSpec) -> Vec<InfraContainer> {
+        let replicas = self.db_replicas.lock().map_or(1, |r| (*r).max(1));
+        let mut containers: Vec<InfraContainer> = (1..=replicas)
+            .map(|replica| InfraContainer {
                 name: "db".into(),
-                docker: format!("{}-lane{}-db-1", spec.project, spec.lane),
+                docker: format!("{}-lane{}-db-{replica}", spec.project, spec.lane),
                 shared: false,
                 state: Some("healthy".into()),
-            },
-            InfraContainer {
-                name: "cache".into(),
-                docker: format!("{}-cache-1", spec.project),
-                shared: true,
-                state: None,
-            },
-        ]
+            })
+            .collect();
+        containers.push(InfraContainer {
+            name: "cache".into(),
+            docker: format!("{}-cache-1", spec.project),
+            shared: true,
+            state: None,
+        });
+        containers
     }
 }
 
@@ -561,13 +607,15 @@ impl InfraProvider for FakeInfra {
             namespace: Self::namespace(spec),
             setup_env: BTreeMap::from([("COMPOSE_PROJECT_NAME".into(), "fake".into())]),
             report: json!({"services": ["db"]}),
-            containers: Self::containers(spec),
+            containers: self.containers(spec),
         })
     }
     async fn namespace(&self, spec: &InfraSpec) -> Result<InfraUp, InfraError> {
         Ok(InfraUp {
             namespace: Self::namespace(spec),
-            containers: Self::containers(spec),
+            // As Compose's provider: the same env `up` gives, nothing started.
+            setup_env: BTreeMap::from([("COMPOSE_PROJECT_NAME".into(), "fake".into())]),
+            containers: self.containers(spec),
             ..InfraUp::default()
         })
     }
@@ -592,13 +640,61 @@ impl InfraProvider for FakeInfra {
     ) -> Result<Option<String>, InfraError> {
         Ok(self.started_at.lock().ok().and_then(|s| s.clone()))
     }
+    /// The stored lines (the last `tail`), then live ones while following.
     async fn container_logs(
         &self,
-        _: &InfraSpec,
-        _: &str,
-        _: usize,
-    ) -> Result<Vec<String>, InfraError> {
-        Ok(self.logs.lock().map(|l| l.clone()).unwrap_or_default())
+        docker: &str,
+        options: ContainerLogOptions,
+    ) -> Result<BoxStream<'static, Result<ContainerLogChunk, InfraError>>, InfraError> {
+        if let Ok(mut requests) = self.log_requests.0.lock() {
+            requests.push(format!(
+                "{docker} tail={:?} follow={}",
+                options.tail, options.follow
+            ));
+        }
+        let format = move |n: usize, line: &str| {
+            let text = if options.timestamps {
+                format!("{} {line}\n", fake_timestamp(n))
+            } else {
+                format!("{line}\n")
+            };
+            Ok(ContainerLogChunk {
+                stderr: false,
+                bytes: Bytes::from(text),
+            })
+        };
+        // The receiver is made under the lock `push_log` takes, so no line is
+        // missed or sent twice between the stored ones and the live ones.
+        let (stored, receiver) = {
+            let logs = self
+                .logs
+                .lock()
+                .map_err(|_| InfraError::new("poisoned", "the fake's log lock is poisoned"))?;
+            (logs.clone(), self.live().subscribe())
+        };
+        let start = options
+            .tail
+            .map_or(0, |tail| stored.len().saturating_sub(tail));
+        let chunks: Vec<_> = stored
+            .iter()
+            .enumerate()
+            .skip(start)
+            .map(|(n, line)| format(n, line))
+            .collect();
+        let stored = futures_util::stream::iter(chunks);
+        if !options.follow {
+            return Ok(stored.boxed());
+        }
+        let live = futures_util::stream::unfold(receiver, move |mut receiver| async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(Some((n, line))) => return Some((format(n, &line), receiver)),
+                    Ok(None) | Err(broadcast::error::RecvError::Closed) => return None,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                }
+            }
+        });
+        Ok(stored.chain(live).boxed())
     }
     async fn adopt(&self, _: &[String]) -> Result<Value, InfraError> {
         Ok(Value::Null)

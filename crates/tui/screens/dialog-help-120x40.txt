@@ -10,7 +10,7 @@
 │   ● api-searc│   h l               fold, unfold; h moves to the section                               │_8121 took=53m│
 │   ● api-catal│   enter  space      fold a section, or type into a running unit                        │              │
 │   ● api-inven│   [ ]  1-9          previous, next lane; lane by its place in the bar                  │_8122 took=66m│
-│   ● api-notif│   n N               next, previous problem                                             │              │
+│   ● api-notif│   n N  e            next, previous problem; every error in full (or click it)          │              │
 │   ● api-repor│   t  i              jump to the tasks, the infra                                       │_8123 took=79m│
 │   ● web-app  │   s  x  r           start, stop, restart the selection; s runs a task                  │              │
 │   ● web-admin│   s  S              on the lane: its default services; every service                   │_8124 took=92m│

@@ -310,9 +310,10 @@ async fn removed_worktree_stops(found_in_linked: bool) {
             &main,
             &["worktree", "remove", "--force", &wt.display().to_string()],
         );
+        // `stopping` comes first, with units still up; wait for the end of it.
         let stopped = eventually(Duration::from_secs(10), || async {
             let lane = lane_at(&h, &main, &wt).await;
-            (lane.state != "running").then_some(lane)
+            (!matches!(lane.state.as_str(), "running" | "stopping")).then_some(lane)
         })
         .await
         .expect("the removed worktree's lane stops");

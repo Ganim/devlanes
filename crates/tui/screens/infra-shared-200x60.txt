@@ -1,13 +1,13 @@
  devlanes  1 acme   2 billing   3 shop                                                                                                       starting feat/checkout: 4 of 8 ready  M monitor   D daemon
  lanes  1 main  2 feat/checkout 4/8  3 fix/cache  4 spike/old-search                                                                                                            1-9 or [ ] switch lanes
-┌ @0 · 34/38 up ───────────────────────────────┐┌ pgbouncer  up · shared · hidden ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ ▾ services                                34 ││ state     healthy                                                                                                                                    │
-│   ● Gateway API                              ││ ports     tcp 6432                                                                                                                                   │
-│   ● api-auth                                 ││ scope     shared by every lane of the project                                                                                                        │
-│   ● api-users                                ││ cpu       2%                                                                                                                                         │
-│   ● api-billing                              ││ memory    180M                                                                                                                                       │
-│   ● api-orders                               ││                                                                                                                                                      │
-│   ● api-search                               ││ Containers start and stop with the lane.                                                                                                             │
+┌ @0 · 34/38 up ───────────────────────────────┐┌ pgbouncer  up · shared · hidden · 6432 ───────────────────────────────────────────────────────────────────────────────────────────────── docker logs ┐
+│ ▾ services                                34 ││ 2026-10-21 10:40:00.112 UTC [1] LOG:  pgbouncer: checkpoint complete: wrote 12 buffers                                                               │
+│   ● Gateway API                              ││ 2026-10-21 10:41:01.112 UTC [1] LOG:  pgbouncer: checkpoint complete: wrote 19 buffers                                                               │
+│   ● api-auth                                 ││ 2026-10-21 10:42:02.112 UTC [1] LOG:  pgbouncer: checkpoint complete: wrote 26 buffers                                                               │
+│   ● api-users                                ││ 2026-10-21 10:43:03.112 UTC [1] LOG:  pgbouncer: checkpoint complete: wrote 33 buffers                                                               │
+│   ● api-billing                              ││ 2026-10-21 10:44:04.112 UTC [1] LOG:  pgbouncer: checkpoint complete: wrote 40 buffers                                                               │
+│   ● api-orders                               ││ 2026-10-21 10:45:05.112 UTC [1] LOG:  pgbouncer: checkpoint complete: wrote 47 buffers                                                               │
+│   ● api-search                               ││                                                                                                                                                      │
 │   ● api-catalog                              ││                                                                                                                                                      │
 │   ● api-inventory                            ││                                                                                                                                                      │
 │   ● api-notify                               ││                                                                                                                                                      │
@@ -57,19 +57,19 @@
 │   ▸ setup                             4 done ││                                                                                                                                                      │
 │                                              ││                                                                                                                                                      │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- / filter   n next problem                                                                                                                                                        ? all keys   q quit
+ pgup scroll back   c select text   z zoom   / filter   n next problem                                                                                                            ? all keys   q quit
 
 --- styles (row: columns style) ---
 0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 179 bold, 180-187 dim, 191 bold, 192-198 dim
 1: 0-6 dim, 7-14 bold reversed, 16-17 dim, 18-34 yellow, 37-47 dim, 50-51 dim, 52-67 yellow, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
-2: 0 darkgray, 2-3 bold, 4-14 dim, 16-48 darkgray, 50-58 bold, 59-60 dim, 61-62 green, 63-80 dim, 82-199 darkgray
-3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-59 dim, 199 darkgray
-4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
-5: 0 darkgray, 4-5 green, 6-13 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
-6: 0 darkgray, 4-5 green, 6-14 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
-7: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+2: 0 darkgray, 2-3 bold, 4-14 dim, 16-48 darkgray, 50-58 bold, 59-60 dim, 61-62 green, 63-87 dim, 89-185 darkgray, 187-197 dim, 199 darkgray
+3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 199 darkgray
+4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 199 darkgray
+5: 0 darkgray, 4-5 green, 6-13 blue, 47-48 darkgray, 199 darkgray
+6: 0 darkgray, 4-5 green, 6-14 blue, 47-48 darkgray, 199 darkgray
+7: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 199 darkgray
 8: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 199 darkgray
-9: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-89 dim, 199 darkgray
+9: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 199 darkgray
 10: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 199 darkgray
 11: 0 darkgray, 4-5 green, 6-18 blue, 47-48 darkgray, 199 darkgray
 12: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 199 darkgray
@@ -119,4 +119,4 @@
 56: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 199 darkgray
 57: 0 darkgray, 47-48 darkgray, 199 darkgray
 58: 0-199 darkgray
-59: 1 bold, 2-11 dim, 12 bold, 13-28 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim
+59: 1-4 bold, 5-19 dim, 20 bold, 21-35 dim, 36 bold, 37-44 dim, 45 bold, 46-55 dim, 56 bold, 57-72 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim

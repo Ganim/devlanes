@@ -10,8 +10,8 @@ use std::{
 };
 
 use devlanes_infra_docker::{
-    ContainerSpec, DockerInfra, EnsureAction, EnsureOptions, Error, EventKind, Health, NamedPort,
-    PortBlock, Protocol, Scope, container_name, labels,
+    ContainerSpec, DockerInfra, EnsureAction, EnsureOptions, Error, EventKind, Health, LogChunk,
+    LogOptions, LogStream, NamedPort, PortBlock, Protocol, Scope, container_name, labels,
 };
 use futures_util::StreamExt;
 
@@ -238,6 +238,83 @@ async fn docker_events_report_lifecycle() {
             "{kinds:?}"
         );
         assert!(kinds.contains(&EventKind::Stopped), "{kinds:?}");
+    })
+    .await;
+    drop(cleanup);
+}
+
+/// Concatenated bytes of `stream` chunks.
+fn text_of(chunks: &[LogChunk], stream: LogStream) -> String {
+    chunks
+        .iter()
+        .filter(|chunk| chunk.stream == stream)
+        .map(|chunk| String::from_utf8_lossy(&chunk.bytes).into_owned())
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "needs docker"]
+async fn docker_logs_tail_and_follow() {
+    let project = unique_project();
+    let name = format!("{project}-logs");
+    let cleanup = Cleanup {
+        project: project.clone(),
+        names: vec![name.clone()],
+    };
+    bounded(async {
+        let script = "echo one; echo two >&2; echo three; sleep 1; echo four; sleep 300";
+        let created = Command::new("docker")
+            .args(["run", "-d", "--name", &name, IMAGE, "sh", "-c", script])
+            .output()
+            .expect("docker run");
+        assert!(created.status.success(), "{created:?}");
+        let infra = DockerInfra::connect().await.expect("connect");
+
+        let mut follow = infra.logs(
+            &name,
+            LogOptions {
+                follow: true,
+                ..LogOptions::default()
+            },
+        );
+        let mut followed = Vec::new();
+        while !text_of(&followed, LogStream::Stdout).contains("four") {
+            let chunk = tokio::time::timeout(Duration::from_secs(30), follow.next())
+                .await
+                .expect("output in time")
+                .expect("stream open")
+                .expect("chunk");
+            followed.push(chunk);
+        }
+        assert_eq!(text_of(&followed, LogStream::Stdout), "one\nthree\nfour\n");
+        assert_eq!(text_of(&followed, LogStream::Stderr), "two\n");
+
+        let tail: Vec<LogChunk> = infra
+            .logs(
+                &name,
+                LogOptions {
+                    tail: Some(1),
+                    timestamps: true,
+                    ..LogOptions::default()
+                },
+            )
+            .map(|chunk| chunk.expect("chunk"))
+            .collect()
+            .await;
+        let last = text_of(&tail, LogStream::Stdout);
+        let (timestamp, line) = last.split_once(' ').expect("timestamped");
+        assert!(timestamp.ends_with('Z'), "{last}");
+        assert_eq!(line, "four\n");
+
+        let missing = infra
+            .logs(&format!("{name}-missing"), LogOptions::default())
+            .next()
+            .await
+            .expect("an error");
+        assert!(
+            missing.as_ref().is_err_and(Error::is_not_found),
+            "{missing:?}"
+        );
     })
     .await;
     drop(cleanup);

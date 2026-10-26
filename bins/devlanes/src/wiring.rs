@@ -20,12 +20,14 @@ use devlanes_daemon::integrations::{
 use devlanes_daemon::{
     Engine, EngineOptions, Handler,
     integrations::{
-        InfraContainer, InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec, InfraUp,
-        Integrations, LaunchCheck, ManagedUnit, PlannedUnit, PortInspector, PortScope, PresetEntry,
-        RouteEntry, RouteSink, RouteStatus, SysProcesses, UnitRunner, unavailable,
+        ContainerLogChunk, ContainerLogOptions, InfraContainer, InfraError, InfraEvent,
+        InfraPortNeed, InfraProvider, InfraSpec, InfraUp, Integrations, LaunchCheck, ManagedUnit,
+        PlannedUnit, PortInspector, PortScope, PresetEntry, RouteEntry, RouteSink, RouteStatus,
+        SysProcesses, UnitRunner, unavailable,
     },
 };
 use devlanes_proto::RpcError;
+use futures_util::stream::BoxStream;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -1847,44 +1849,37 @@ impl InfraProvider for ContainerInfra {
         Ok(Value::Object(report))
     }
 
-    /// The last `tail` stdout and stderr lines of a plain container.
+    /// Stdout and stderr of any container through the Engine API.
     async fn container_logs(
         &self,
-        spec: &InfraSpec,
-        container: &str,
-        tail: usize,
-    ) -> Result<Vec<String>, InfraError> {
+        docker: &str,
+        options: ContainerLogOptions,
+    ) -> Result<BoxStream<'static, Result<ContainerLogChunk, InfraError>>, InfraError> {
         use futures_util::StreamExt;
-        let docker = self.docker()?;
-        let declared = spec
-            .containers
-            .iter()
-            .find(|c| c.name == container)
-            .ok_or_else(|| {
-                InfraError::new("not_found", format!("no container named {container}"))
-            })?;
-        let scope = if declared.per_lane {
-            devlanes_infra_docker::Scope::Lane(spec.lane)
-        } else {
-            devlanes_infra_docker::Scope::Shared
-        };
-        let name = devlanes_infra_docker::container_name(&spec.project, container, scope);
-        let options = bollard::query_parameters::LogsOptionsBuilder::new()
-            .stdout(true)
-            .stderr(true)
-            .tail(&tail.to_string())
-            .build();
-        let mut stream = docker.client().logs(&name, Some(options));
-        let mut text = String::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| {
-                docker_error(&format!("logs of container {name}"))(
-                    devlanes_infra_docker::Error::Docker(error),
-                )
-            })?;
-            text.push_str(&String::from_utf8_lossy(&chunk.into_bytes()));
-        }
-        Ok(text.lines().map(str::to_owned).collect())
+        let operation = format!("logs of container {docker}");
+        let missing = format!("no container named {docker}");
+        let stream = self
+            .docker()?
+            .logs(
+                docker,
+                devlanes_infra_docker::LogOptions {
+                    tail: options.tail,
+                    follow: options.follow,
+                    since: options.since,
+                    timestamps: options.timestamps,
+                },
+            )
+            .map(move |chunk| match chunk {
+                Ok(chunk) => Ok(ContainerLogChunk {
+                    stderr: chunk.stream == devlanes_infra_docker::LogStream::Stderr,
+                    bytes: chunk.bytes,
+                }),
+                Err(error) if error.is_not_found() => {
+                    Err(InfraError::new("not_found", missing.clone()))
+                }
+                Err(error) => Err(docker_error(&operation)(error)),
+            });
+        Ok(stream.boxed())
     }
 
     /// `StartedAt` of a plain container or a shared/per-lane compose service.

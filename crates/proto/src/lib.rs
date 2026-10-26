@@ -149,6 +149,11 @@ pub enum Method {
     InfraDown,
     #[serde(rename = "infra.status")]
     InfraStatus,
+    /// Docker logs of one infra container of the lane ([`InfraLogsParams`]):
+    /// a [`Page`] of [`LogLine`]s, or with `follow` [`events::LOG`] events
+    /// until the client leaves.
+    #[serde(rename = "infra.logs")]
+    InfraLogs,
     #[serde(rename = "hosts")]
     Hosts,
     #[serde(rename = "env")]
@@ -393,6 +398,26 @@ pub struct LogQuery {
     pub mine: bool,
     /// Also send [`LogLine::styled`]: for a client that shows colors.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub styled: bool,
+}
+
+/// `infra.logs` parameters. The daemon reads Docker's logs and stores nothing.
+/// Lines carry `unit` = `container`, a `seq` counted per request and Docker's
+/// timestamp. A compose service with several replicas merges them, each line
+/// prefixed with `<container>-<n> | `.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InfraLogsParams {
+    /// A compose service or `infra.containers` name, as in [`ContainerSummary::name`].
+    pub container: String,
+    /// The last N lines; the daemon defaults to 200.
+    #[serde(default)]
+    pub tail: Option<usize>,
+    /// After the tail, stream new lines as [`events::LOG`] events until the client
+    /// disconnects. A container restart does not end it.
+    #[serde(default)]
+    pub follow: bool,
+    /// Also send [`LogLine::styled`].
+    #[serde(default)]
     pub styled: bool,
 }
 

@@ -364,6 +364,21 @@ pub fn lanes() -> Vec<LaneSummary> {
     ]
 }
 
+/// The Docker log lines a container's pane shows, as the TUI writes them.
+pub fn container_logs(container: &str) -> Vec<u8> {
+    let lines: Vec<String> = (0..6)
+        .map(|i| {
+            format!(
+                "2026-10-21 10:4{i}:0{i}.112 UTC [1] LOG:  {container}: checkpoint complete: wrote {} buffers",
+                12 + i * 7
+            )
+        })
+        .collect();
+    let mut bytes = lines.join("\r\n").into_bytes();
+    bytes.extend_from_slice(b"\r\n");
+    bytes
+}
+
 /// What a unit's terminal shows when the TUI attaches.
 pub fn screen(unit: &str) -> Vec<u8> {
     let lines: Vec<String> = match unit.split('-').next() {

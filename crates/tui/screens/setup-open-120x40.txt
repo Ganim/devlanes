@@ -1,11 +1,11 @@
  devlanes  1 acme   2 billing   3 shop                       starting feat/checkout: 4 of 8 ready  M monitor   D daemon
  lanes  1 main  2 feat/checkout 4/8  3 fix/cache  4 spike/old-search                            1-9 or [ ] switch lanes
 ┌ @0 · 34/38 up ───────────────────────────────┐┌ setup ───────────────────────────────────────────────────────────────┐
-│   ● api-catalog                              ││   name         state       cpu memory  url                           │
-│   ● api-inventory                            ││ ✓ setup.certs  done          -      -                                │
-│   ● api-notify                               ││ ✓ setup.db     done          -      -                                │
-│   ● api-reports                              ││ ✓ setup.env    done          -      -                                │
-│   ● web-app                                  ││ ✓ setup.seed   done          -      -                                │
+│   ● api-catalog                              ││   name   state       cpu memory  url                                 │
+│   ● api-inventory                            ││ ✓ certs  done          -      -                                      │
+│   ● api-notify                               ││ ✓ db     done          -      -                                      │
+│   ● api-reports                              ││ ✓ env    done          -      -                                      │
+│   ● web-app                                  ││ ✓ seed   done          -      -                                      │
 │   ● web-admin                                ││                                                                      │
 │   ● web-docs                                 ││                                                                      │
 │   · web-storybook                            ││                                                                      │
@@ -43,11 +43,11 @@
 0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
 1: 0-6 dim, 7-14 bold reversed, 16-17 dim, 18-34 yellow, 37-47 dim, 50-51 dim, 52-67 yellow, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
 2: 0 darkgray, 2-3 bold, 4-14 dim, 16-48 darkgray, 50-54 bold, 56-119 darkgray
-3: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-91 dim, 119 darkgray
-4: 0 darkgray, 4-5 green, 6-18 blue, 47-48 darkgray, 50-51 green, 65-73 dim, 119 darkgray
-5: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-51 green, 65-73 dim, 119 darkgray
-6: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-51 green, 65-73 dim, 119 darkgray
-7: 0 darkgray, 4-12 green, 47-48 darkgray, 50-51 green, 65-73 dim, 119 darkgray
+3: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-85 dim, 119 darkgray
+4: 0 darkgray, 4-5 green, 6-18 blue, 47-48 darkgray, 50-51 green, 59-67 dim, 119 darkgray
+5: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-51 green, 59-67 dim, 119 darkgray
+6: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-51 green, 59-67 dim, 119 darkgray
+7: 0 darkgray, 4-12 green, 47-48 darkgray, 50-51 green, 59-67 dim, 119 darkgray
 8: 0 darkgray, 4-14 green, 47-48 darkgray, 119 darkgray
 9: 0 darkgray, 4-13 green, 47-48 darkgray, 119 darkgray
 10: 0 darkgray, 4-5 dim, 6-18 dim green, 47-48 darkgray, 119 darkgray

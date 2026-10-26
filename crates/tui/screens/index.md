@@ -306,6 +306,14 @@ a start that failed: badge on the row, full error in the pane
 - 120x40: [txt](unit-start-failed-120x40.txt) · [png](unit-start-failed-120x40.png) · [ansi](unit-start-failed-120x40.ansi)
 - 80x24: [txt](unit-start-failed-80x24.txt) · [png](unit-start-failed-80x24.png) · [ansi](unit-start-failed-80x24.ansi)
 
+## dialog-errors
+
+the error list (e): the newest error in full, the header cuts it
+
+- 200x60: [txt](dialog-errors-200x60.txt) · [png](dialog-errors-200x60.png) · [ansi](dialog-errors-200x60.ansi)
+- 120x40: [txt](dialog-errors-120x40.txt) · [png](dialog-errors-120x40.png) · [ansi](dialog-errors-120x40.ansi)
+- 80x24: [txt](dialog-errors-80x24.txt) · [png](dialog-errors-80x24.png) · [ansi](dialog-errors-80x24.ansi)
+
 ## update-badge
 
 a newer release in the header

@@ -1172,6 +1172,7 @@ dependencies = [
  "futures-util",
  "globset",
  "indexmap",
+ "jiff",
  "regex",
  "rustix",
  "serde",
@@ -1266,6 +1267,7 @@ name = "devlanes-infra-docker"
 version = "0.3.0"
 dependencies = [
  "bollard",
+ "bytes",
  "devlanes-core",
  "futures-util",
  "serde",

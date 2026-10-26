@@ -37,7 +37,7 @@ pub struct CommandTitle {
 }
 
 /// The title for `request` when it runs long: `start`, `restart`,
-/// `lane resume`, `lane new --start`, `wait`, `logs -f` and `attach`. `None`
+/// `lane resume`, `lane new --start`, `wait`, `logs -f`, `infra logs -f` and `attach`. `None`
 /// for everything else, which ends too soon for a title.
 pub fn command_title(request: &Request) -> Option<CommandTitle> {
     let strings = |key: &str| -> Vec<String> {
@@ -59,6 +59,7 @@ pub fn command_title(request: &Request) -> Option<CommandTitle> {
         Method::LaneNew if flag("start") => ("lane new", strings("branch")),
         Method::Wait => ("wait", strings("target")),
         Method::Logs if flag("follow") => ("logs -f", strings("units")),
+        Method::InfraLogs if flag("follow") => ("infra logs -f", strings("container")),
         Method::Attach => ("attach", strings("unit")),
         _ => return None,
     };

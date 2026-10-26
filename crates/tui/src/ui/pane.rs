@@ -69,12 +69,45 @@ pub fn render(app: &App, frame: &mut Frame, boxed: Rect, area: Rect) {
                     if c.hidden {
                         facts.push(Span::styled("hidden", theme.quiet()));
                     }
+                    if !c.ports.is_empty() {
+                        let ports: Vec<String> = c.ports.values().map(u16::to_string).collect();
+                        facts.push(Span::styled(ports.join(" "), theme.quiet()));
+                    }
                     dotted(app, facts)
                 })
                 .unwrap_or_default();
-            render_header(app, frame, boxed, title(&name, "", app), facts);
-            if let Some(container) = &container {
-                details(frame, container_lines(app, container, width), area, app);
+            let attached = app
+                .attached
+                .as_ref()
+                .filter(|a| a.container && a.lane == lane.reference && a.unit == name);
+            let right = attached
+                .and_then(|a| container_mode_text(app, a))
+                .unwrap_or_default();
+            render_box(app, frame, boxed, title(&name, "", app), facts, right);
+            match attached {
+                Some(attached) if !matches!(attached.state, AttachState::Failed(_)) => {
+                    render_terminal(app, attached, frame, area, false);
+                    if let PaneMode::Copy(state) = &attached.mode {
+                        highlight_copy(theme, *state, frame, area);
+                    }
+                }
+                // No logs to show: the facts, and why there are no logs.
+                _ => {
+                    let mut lines = Vec::new();
+                    if let Some(AttachState::Failed(reason)) = attached.map(|a| &a.state) {
+                        lines.extend(field(
+                            theme,
+                            "logs",
+                            &reason.summary,
+                            width,
+                            theme.tone(Tone::Failure),
+                        ));
+                    }
+                    if let Some(container) = &container {
+                        lines.extend(container_lines(app, container, width));
+                    }
+                    details(frame, lines, area, app);
+                }
             }
         }
         Some(RowId::Section(_) | RowId::Group(..)) => {
@@ -338,7 +371,7 @@ fn render_unit(
     let attached = app
         .attached
         .as_ref()
-        .filter(|a| a.lane == lane.reference && a.unit == unit.name);
+        .filter(|a| a.lane == lane.reference && a.unit == unit.name && !a.container);
     // A unit that does not run has nothing to watch or type into.
     let right = attached
         .filter(|a| is_active_state(&unit.state) || !matches!(a.mode, PaneMode::Live))
@@ -348,7 +381,7 @@ fn render_unit(
         app,
         frame,
         boxed,
-        title(unit.label(), &unit.name, app),
+        title(tree::short_name(unit), &unit.name, app),
         unit_facts_title(app, unit),
         right,
     );
@@ -423,6 +456,23 @@ fn mode_text(app: &App, attached: &Attached, width: usize) -> Option<Vec<Span<'s
         // The long form where the mockup at 200 columns has room for it.
         _ if width >= 120 => quiet("watching · enter types into it"),
         _ => quiet("watching · enter types"),
+    }
+}
+
+/// What a container's pane shows at the right of its title: Docker's logs,
+/// how far they are scrolled, or the copy keys.
+fn container_mode_text(app: &App, attached: &Attached) -> Option<Vec<Span<'static>>> {
+    let quiet = |text: &str| Some(vec![Span::styled(text.to_owned(), app.theme.quiet())]);
+    match (&attached.mode, &attached.state) {
+        (PaneMode::Copy(_), _) => quiet("selecting · v mark · y copy · esc cancel"),
+        (_, AttachState::Opening) => quiet("docker logs · loading…"),
+        (_, AttachState::Closed) => quiet("docker logs · ended"),
+        (_, AttachState::Failed(_)) => None,
+        _ if attached.screen.scroll_offset() > 0 => quiet(&format!(
+            "docker logs · {} lines up",
+            attached.screen.scroll_offset()
+        )),
+        _ => quiet("docker logs"),
     }
 }
 
@@ -680,7 +730,12 @@ fn task_lines(app: &App, lane: &LaneSummary, name: &str, width: usize) -> Vec<Li
         Some(run) if run.state == "failed" => "Its last run failed. s runs it again.",
         Some(_) => "s runs it again.",
     };
-    let mut lines = sentence(text, width, Vec::new(), plain);
+    let mut lines = Vec::new();
+    if let Some(entry) = target_error(app, &lane.reference, Some(name)) {
+        lines.extend(error_banner(theme, &entry.what, &entry.worded, width));
+        lines.push(Line::from(""));
+    }
+    lines.extend(sentence(text, width, Vec::new(), plain));
     lines.push(Line::from(""));
     if let Some(run) = info.and_then(|i| i.last_run.as_ref()) {
         let mut last = run.state.clone();
@@ -800,7 +855,7 @@ fn members_table(
                 .units
                 .iter()
                 .find(|u| u.name == *name)
-                .map(|u| text::width(u.label())),
+                .map(|u| text::width(tree::short_name(u))),
             RowId::Task(name) | RowId::Container(name) => Some(text::width(name)),
             _ => None,
         })
@@ -827,7 +882,7 @@ fn members_table(
                 (
                     look.glyph,
                     look.tone,
-                    clean(unit.label()),
+                    clean(tree::short_name(unit)),
                     look.word,
                     unit.cpu_percent,
                     unit.memory_bytes,

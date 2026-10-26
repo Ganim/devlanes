@@ -58,7 +58,7 @@ pub enum Error {
 
 impl Error {
     /// Docker answers 404 for missing containers, images and volumes.
-    pub(crate) fn is_not_found(&self) -> bool {
+    pub fn is_not_found(&self) -> bool {
         matches!(
             self,
             Error::Docker(bollard::errors::Error::DockerResponseServerError {
