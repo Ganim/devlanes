@@ -1,6 +1,6 @@
 {
   "name": "devlanes",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Teaches Codex to run dev services through the devlanes CLI and blocks backgrounded dev servers",
   "keywords": ["dev-server", "worktree", "processes", "logs"],
   "skills": "./skills/",

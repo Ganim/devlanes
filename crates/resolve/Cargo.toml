@@ -1,7 +1,7 @@
 [package]
 name = "devlanes-resolve"
 description = "Lane resolution for devlanes: ports, hostnames, environments and launch plans"
-version = "0.4.0"
+version = "0.4.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
