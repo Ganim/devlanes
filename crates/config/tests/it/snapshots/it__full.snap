@@ -25,6 +25,7 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -324,6 +325,7 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -346,6 +348,7 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -373,6 +376,7 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -393,6 +397,7 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -528,6 +533,7 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
         "http": {
           "path": "/healthz",
           "status": 200,
+          "host": "${{ self.hosts[0] }}",
           "timeout": "60000ms"
         },
         "log": null,

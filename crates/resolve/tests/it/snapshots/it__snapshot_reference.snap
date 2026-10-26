@@ -123,7 +123,7 @@ expression: lane_view(&lane)
       "hosts": [
         "catalog.acme-2.localhost"
       ],
-      "ready": "Http { port: 21004, path: \"/-/health\", status: None } within 60s",
+      "ready": "Http { port: 21004, path: \"/-/health\", status: None, host: None } within 60s",
       "stop": "signal 15 after 10s",
       "pty": true,
       "autostart": true,
@@ -185,7 +185,7 @@ expression: lane_view(&lane)
       "hosts": [
         "crm.acme-2.localhost"
       ],
-      "ready": "Http { port: 21006, path: \"/-/health\", status: None } within 60s",
+      "ready": "Http { port: 21006, path: \"/-/health\", status: None, host: None } within 60s",
       "stop": "signal 15 after 10s",
       "pty": true,
       "autostart": true,
@@ -248,7 +248,7 @@ expression: lane_view(&lane)
       "hosts": [
         "admin-api.acme-2.localhost"
       ],
-      "ready": "Http { port: 21000, path: \"/-/health\", status: None } within 60s",
+      "ready": "Http { port: 21000, path: \"/-/health\", status: None, host: None } within 60s",
       "stop": "signal 15 after 10s",
       "pty": true,
       "autostart": true,
@@ -315,7 +315,7 @@ expression: lane_view(&lane)
       "hosts": [
         "payments-api.acme-2.localhost"
       ],
-      "ready": "Http { port: 21005, path: \"/-/health\", status: None } within 60s",
+      "ready": "Http { port: 21005, path: \"/-/health\", status: None, host: None } within 60s",
       "stop": "signal 15 after 10s",
       "pty": true,
       "autostart": true,
@@ -821,7 +821,7 @@ expression: lane_view(&lane)
       "hosts": [
         "ai.acme-2.localhost"
       ],
-      "ready": "Http { port: 21001, path: \"/healthz\", status: Some(200) } within 60s",
+      "ready": "Http { port: 21001, path: \"/healthz\", status: Some(200), host: Some(\"ai.acme-2.localhost\") } within 60s",
       "stop": "signal 15 after 10s",
       "pty": true,
       "autostart": true,

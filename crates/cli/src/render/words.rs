@@ -86,26 +86,35 @@ pub(crate) fn spawn_hint(data: &Value) -> Option<Hint> {
     }
 }
 
-/// `; last answer 302` (`, expected 200` when a status was set) from an http
-/// check's timeout data `{last_status?, expected_status?}`; empty when nothing
-/// answered.
+/// `; GET /healthz (Host: 127.0.0.1:3000) answered 302` (`, expected 200` when a
+/// status was set) from an http check's timeout data `{http_path?, http_host?,
+/// last_status?, expected_status?}`; `; last answer 302` from daemons that send no
+/// `http_path`; empty when nothing answered.
 fn last_answer(data: &Value) -> String {
     let Some(code) = int(data, "last_status") else {
         return String::new();
     };
+    let path = text(data, "http_path");
+    let answer = if path.is_empty() {
+        format!("; last answer {code}")
+    } else {
+        let host = text(data, "http_host");
+        format!("; GET {path} (Host: {host}) answered {code}")
+    };
     match int(data, "expected_status") {
-        Some(expected) => format!("; last answer {code}, expected {expected}"),
-        None => format!("; last answer {code}"),
+        Some(expected) => format!("{answer}, expected {expected}"),
+        None => answer,
     }
 }
 
 /// The fix for an http check that timed out on a non-2xx answer without a
-/// configured `status`: accept that code or probe a path that answers 2xx.
+/// configured `status`: probe a route that answers 2xx, sending the app's own
+/// hostname when it routes by host, or accept that code.
 pub fn status_hint(data: &Value) -> Option<Hint> {
     let code = int(data, "last_status").filter(|code| !(200..300).contains(code))?;
     int(data, "expected_status").is_none().then(|| {
         Hint(format!(
-            "set `ready.http.status: {code}` or use a path that answers 2xx"
+            "use a `ready.http.path` that answers 2xx, set `ready.http.host` if the app routes by hostname, or set `ready.http.status: {code}`"
         ))
     })
 }
@@ -868,7 +877,8 @@ fn more_errors(code: &str, data: &Value) -> Option<(String, Option<Hint>)> {
             Some(Hint::command(["url", "ls"])),
         ),
         "unsafe_home" => unsafe_home(data),
-        // `{container, check, timeout_ms, expected_status?, last_status?}`: an infra
+        // `{container, check, timeout_ms, http_path?, http_host?, expected_status?,
+        // last_status?}`: an infra
         // container's ready check.
         "container_not_ready" => (
             format!(

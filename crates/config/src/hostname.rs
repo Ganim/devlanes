@@ -34,6 +34,22 @@ pub(crate) fn check_host_template(template: &str) -> Result<(), String> {
     broken_rule(&shape).map_or(Ok(()), |why| Err(format!("`{template}`: {why}")))
 }
 
+/// Checks a `ready.http.host` value. It goes into the probe's Host header as written
+/// and may carry a port, so only an empty value, spaces and control characters (which
+/// would split the request) are refused.
+pub fn check_host_header(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("the Host header cannot be empty".into());
+    }
+    if host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "`{}`: a Host header cannot contain spaces or control characters",
+            host.escape_debug()
+        ));
+    }
+    Ok(())
+}
+
 /// The first DNS rule a lowercase, dot-trimmed host breaks.
 fn broken_rule(host: &str) -> Option<String> {
     let name = host.strip_prefix("*.").unwrap_or(host);
@@ -104,6 +120,16 @@ mod tests {
                     .into()
             )
         );
+    }
+
+    #[test]
+    /// A Host header may carry a port but nothing that would split the request.
+    fn host_headers() {
+        assert!(check_host_header("api.acme.localhost").is_ok());
+        assert!(check_host_header("127.0.0.1:8080").is_ok());
+        for bad in ["", "a b", "api\r\nX-Evil: 1", "api\t"] {
+            assert!(check_host_header(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

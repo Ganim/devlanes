@@ -1901,8 +1901,9 @@ fn daemon_errors_are_worded_with_hints() {
     insta::assert_snapshot!("render_daemon_errors", output);
 }
 
-/// An http readiness timeout names the last status the probe got; a non-2xx
-/// answer without a configured `status` gets the fix instead of the logs hint.
+/// An http readiness timeout names the request and the last status the probe got
+/// (only the status from daemons that send no `http_path`); a non-2xx answer without
+/// a configured `status` gets the fix instead of the logs hint.
 #[test]
 fn http_ready_timeouts_name_the_last_answer() {
     let unit = json!({"lane": "acme@2", "unit": "web", "check": "http", "timeout_ms": 60000,
@@ -1917,6 +1918,14 @@ fn http_ready_timeouts_name_the_last_answer() {
     let errors = [
         RpcError::new(
             "ready_timeout",
+            with(
+                json!({"http_path": "/-/health", "http_host": "127.0.0.1:20100",
+                "last_status": 404, "expected_status": null}),
+            ),
+            1,
+        ),
+        RpcError::new(
+            "ready_timeout",
             with(json!({"last_status": 302, "expected_status": null})),
             1,
         ),
@@ -1929,6 +1938,7 @@ fn http_ready_timeouts_name_the_last_answer() {
         RpcError::new(
             "container_not_ready",
             json!({"container": "db", "check": "http", "timeout_ms": 30000,
+                "http_path": "/", "http_host": "db.example.invalid",
                 "last_status": 401, "expected_status": null}),
             1,
         ),
@@ -1950,15 +1960,17 @@ fn http_ready_timeouts_name_the_last_answer() {
             .stdout,
     );
     insta::assert_snapshot!(output, @r"
+    error: acme@2:web wasn't ready in time; GET /-/health (Host: 127.0.0.1:20100) answered 404
+    hint: use a `ready.http.path` that answers 2xx, set `ready.http.host` if the app routes by hostname, or set `ready.http.status: 404`
     error: acme@2:web wasn't ready in time; last answer 302
-    hint: set `ready.http.status: 302` or use a path that answers 2xx
+    hint: use a `ready.http.path` that answers 2xx, set `ready.http.host` if the app routes by hostname, or set `ready.http.status: 302`
     error: acme@2:web wasn't ready in time; last answer 404, expected 200
     hint: devlanes logs acme@2:web --tail 200
     error: acme@2:web wasn't ready in time
     hint: devlanes logs acme@2:web --tail 200
-    error: container db did not pass its http check within 30s; last answer 401
-    hint: set `ready.http.status: 401` or use a path that answers 2xx
+    error: container db did not pass its http check within 30s; GET / (Host: db.example.invalid) answered 401
+    hint: use a `ready.http.path` that answers 2xx, set `ready.http.host` if the app routes by hostname, or set `ready.http.status: 401`
     failed acme@2:web
-      did not become ready before the timeout; last answer 302 (set `ready.http.status: 302` or use a path that answers 2xx)
+      did not become ready before the timeout; last answer 302 (use a `ready.http.path` that answers 2xx, set `ready.http.host` if the app routes by hostname, or set `ready.http.status: 302`)
     ");
 }

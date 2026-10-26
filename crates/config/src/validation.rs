@@ -220,6 +220,13 @@ fn readiness(path: &str, ready: &ReadyConfig) -> Result<(), ConfigError> {
                 "HTTP readiness status must be between 100 and 599",
             ));
         }
+        // Templates are checked once a lane evaluates them.
+        if let Some(http) = &check.http
+            && let Some(Templated::Literal(host)) = &http.host
+        {
+            crate::check_host_header(host)
+                .map_err(|why| fail(&format!("{path}.http.host"), why))?;
+        }
     }
     Ok(())
 }

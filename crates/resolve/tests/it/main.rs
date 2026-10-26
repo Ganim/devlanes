@@ -253,7 +253,15 @@ async fn port_overrides() {
                 port: payments.port,
                 path: "/-/health".into(),
                 status: None,
+                host: None,
             }
+        );
+        // `host: ${{ self.hosts[0] }}` sends the service's own hostname.
+        let ai = &lane.services["ai-gateway"];
+        assert!(
+            matches!(&ai.ready.check, ReadySpec::Http { host: Some(host), .. } if *host == ai.hosts[0]),
+            "{:?}",
+            ai.ready.check
         );
         // No allocated port may land on the reserved offset.
         for service in lane.services.values().filter(|s| !s.literal_port) {

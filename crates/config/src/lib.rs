@@ -32,7 +32,7 @@ pub use expression::{
     ExpressionContext, evaluate, evaluate_env, evaluate_typed, references, resolve_lane_vars,
 };
 pub use extensions::{Extensions, OpaqueExtensions};
-pub use hostname::normalize_host;
+pub use hostname::{check_host_header, normalize_host};
 pub use loader::{
     ConfigSources, check, check_compose_files, load_project, load_project_with, parse_project,
     parse_project_with,

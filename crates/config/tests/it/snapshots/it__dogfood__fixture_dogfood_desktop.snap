@@ -69,6 +69,7 @@ expression: config
           "http": {
             "path": "/_cerbos/health",
             "status": null,
+            "host": null,
             "timeout": "45000ms"
           },
           "log": null,
@@ -461,6 +462,7 @@ expression: config
         "http": {
           "path": "/",
           "status": 302,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -482,6 +484,7 @@ expression: config
         "http": {
           "path": "/",
           "status": 302,
+          "host": null,
           "timeout": "180000ms"
         },
         "log": null,

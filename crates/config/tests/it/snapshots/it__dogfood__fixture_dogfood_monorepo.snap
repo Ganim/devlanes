@@ -16,6 +16,7 @@ expression: config
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -34,6 +35,7 @@ expression: config
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": "90000ms"
         },
         "log": null,
@@ -336,6 +338,7 @@ expression: config
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -365,6 +368,7 @@ expression: config
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -393,6 +397,7 @@ expression: config
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -421,6 +426,7 @@ expression: config
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -469,6 +475,7 @@ expression: config
         "http": {
           "path": "/",
           "status": 302,
+          "host": null,
           "timeout": null
         },
         "log": null,
@@ -556,6 +563,7 @@ expression: config
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": "90000ms"
         },
         "log": null,
@@ -590,6 +598,7 @@ expression: config
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": "90000ms"
         },
         "log": null,
@@ -640,6 +649,7 @@ expression: config
         "http": {
           "path": "/-/health",
           "status": null,
+          "host": null,
           "timeout": "90000ms"
         },
         "log": null,
@@ -664,6 +674,7 @@ expression: config
         "http": {
           "path": "/health",
           "status": null,
+          "host": null,
           "timeout": null
         },
         "log": null,

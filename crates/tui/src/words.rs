@@ -141,15 +141,23 @@ fn logs_hint(data: &Value) -> Option<String> {
     (!field(data, "unit").is_empty()).then(|| format!("devlanes logs {found} --tail 200"))
 }
 
-/// `; last answer 302` (`, expected 200` when a status was set) from an http
-/// check's `ready_timeout` data, as the CLI words it; empty when nothing answered.
+/// `; GET /healthz (Host: 127.0.0.1:3000) answered 302` (`, expected 200` when a
+/// status was set) from an http check's timeout data, as the CLI words it; `; last
+/// answer 302` from daemons that send no `http_path`; empty when nothing answered.
 fn last_answer(data: &Value) -> String {
     let Some(code) = data.get("last_status").and_then(Value::as_u64) else {
         return String::new();
     };
+    let path = field(data, "http_path");
+    let answer = if path.is_empty() {
+        format!("; last answer {code}")
+    } else {
+        let host = field(data, "http_host");
+        format!("; GET {path} (Host: {host}) answered {code}")
+    };
     match data.get("expected_status").and_then(Value::as_u64) {
-        Some(expected) => format!("; last answer {code}, expected {expected}"),
-        None => format!("; last answer {code}"),
+        Some(expected) => format!("{answer}, expected {expected}"),
+        None => answer,
     }
 }
 
@@ -163,7 +171,11 @@ fn status_hint(data: &Value) -> Option<String> {
     data.get("expected_status")
         .and_then(Value::as_u64)
         .is_none()
-        .then(|| format!("set `ready.http.status: {code}` or use a path that answers 2xx"))
+        .then(|| {
+            format!(
+                "use a `ready.http.path` that answers 2xx, set `ready.http.host` if the app routes by hostname, or set `ready.http.status: {code}`"
+            )
+        })
 }
 
 /// A failed helper command split into its parts. The daemon formats these as
@@ -506,22 +518,27 @@ mod tests {
         );
     }
 
-    /// An http check that saw a non-2xx answer without `status` set says which
-    /// code came back and how to accept it; a configured status keeps the logs hint.
+    /// An http check that saw a non-2xx answer without `status` set says what it
+    /// requested, which code came back and how to fix it; a configured status keeps
+    /// the logs hint, and data without `http_path` (older daemons) names the code alone.
     #[test]
     fn ready_timeout_names_the_last_http_answer() {
         let base = json!({"lane": "acme@0", "unit": "web", "check": "http"});
         let mut redirected = base.clone();
+        redirected["http_path"] = json!("/login");
+        redirected["http_host"] = json!("127.0.0.1:3000");
         redirected["last_status"] = json!(302);
         redirected["expected_status"] = Value::Null;
         let worded = rpc(&RpcError::new("ready_timeout", redirected, 1));
         assert_eq!(
             worded.summary,
-            "acme@0:web wasn't ready in time; last answer 302"
+            "acme@0:web wasn't ready in time; GET /login (Host: 127.0.0.1:3000) answered 302"
         );
         assert_eq!(
             worded.hint.as_deref(),
-            Some("set `ready.http.status: 302` or use a path that answers 2xx")
+            Some(
+                "use a `ready.http.path` that answers 2xx, set `ready.http.host` if the app routes by hostname, or set `ready.http.status: 302`"
+            )
         );
         let mut expected = base.clone();
         expected["last_status"] = json!(404);
@@ -551,7 +568,9 @@ mod tests {
         );
         assert_eq!(
             worded.hint.as_deref(),
-            Some("set `ready.http.status: 403` or use a path that answers 2xx")
+            Some(
+                "use a `ready.http.path` that answers 2xx, set `ready.http.host` if the app routes by hostname, or set `ready.http.status: 403`"
+            )
         );
         let user = json!({"message": "tui.theme: unknown variant", "file": "/home/acme/.devlanes/config.yaml", "line": 4, "column": 10});
         let worded = rpc(&RpcError::new("config_error", user, 1));

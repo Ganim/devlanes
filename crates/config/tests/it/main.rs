@@ -313,6 +313,10 @@ fn structural_validation() {
             "services.api.ready: ready requires exactly one of tcp, http, log, or cmd",
         ),
         (
+            "project: demo\nservices: { api: { run: a, ready: { http: { host: 'api local' } } } }",
+            "services.api.ready.http.host: `api local`: a Host header cannot contain spaces",
+        ),
+        (
             "project: demo\nservices: { api: { run: a, gui: {} } }",
             "`gui` is not supported yet",
         ),

@@ -294,7 +294,7 @@ pub(crate) fn merge_ready(base: &mut crate::ReadyConfig, overlay: crate::ReadyCo
             }
             replace!(base, overlay, tcp, log, cmd, timeout);
             merge_option(&mut base.http, overlay.http, |base, overlay| {
-                replace!(base, overlay, path, status, timeout);
+                replace!(base, overlay, path, status, host, timeout);
             });
         }
         (base, overlay) => *base = overlay,

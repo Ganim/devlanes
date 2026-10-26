@@ -401,6 +401,25 @@
       ],
       "markdownDescription": "HTTP readiness probe against the unit's main port. Passes on a 2xx answer when `status` is unset, or on exactly `status` when it is set. Redirects are not followed.",
       "properties": {
+        "host": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Templated_string",
+              "description": "",
+              "examples": [],
+              "markdownDescription": ""
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Host header the check sends, for apps that answer only on their own hostname, such as `${{ self.hosts[0] }}`. The request still goes to 127.0.0.1; only the header changes. Defaults to `127.0.0.1:<port>`. Spaces and control characters are refused.",
+          "examples": [
+            "${{ self.hosts[0] }}",
+            "api.example.invalid"
+          ],
+          "markdownDescription": "Host header the check sends, for apps that answer only on their own hostname, such as `${{ self.hosts[0] }}`. The request still goes to 127.0.0.1; only the header changes. Defaults to `127.0.0.1:<port>`. Spaces and control characters are refused."
+        },
         "path": {
           "anyOf": [
             {

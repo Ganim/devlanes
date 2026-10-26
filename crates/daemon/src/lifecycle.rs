@@ -247,10 +247,16 @@ pub(crate) fn readiness(spec: &ReadySpec, env: BTreeMap<String, String>) -> Read
     match spec {
         ReadySpec::Started => Readiness::Started,
         ReadySpec::Tcp { port } => Readiness::Tcp { port: *port },
-        ReadySpec::Http { port, path, status } => Readiness::Http {
+        ReadySpec::Http {
+            port,
+            path,
+            status,
+            host,
+        } => Readiness::Http {
             port: *port,
             path: path.clone(),
             status: *status,
+            host: host.clone(),
         },
         ReadySpec::Log { pattern } => Readiness::Log {
             pattern: pattern.clone(),

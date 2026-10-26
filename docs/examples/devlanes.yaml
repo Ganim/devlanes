@@ -314,6 +314,8 @@ services:
       http:
         path: /healthz
         status: 200
+        # Host header to send, for apps that only answer on their own hostname.
+        host: ${{ self.hosts[0] }}
         timeout: 60s
     # ready:
     #   tcp: true

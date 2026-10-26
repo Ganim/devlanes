@@ -549,7 +549,7 @@ pub struct ReadyCheck {
     /// Ready once a GET request to `path` on the unit's main port answers with `status`, or
     /// with a 2xx status when `status` is unset. Redirects are not followed. Best when the
     /// app has a health route that fails while it is broken.
-    pub http: Option<HttpReady>,
+    pub http: Option<Box<HttpReady>>,
     /// Ready once a line of output matches this regular expression, with colors and other
     /// terminal escape codes removed; recent lines printed before the check began count
     /// too. Suits workers without a port: have them print a line once connected.
@@ -597,6 +597,11 @@ pub struct HttpReady {
     /// (redirects are not followed).
     /// Set it to accept another code, such as `302` for a route that redirects to a login.
     pub status: Option<Templated<u16>>,
+    /// Host header the check sends, for apps that answer only on their own hostname, such
+    /// as `${{ self.hosts[0] }}`. The request still goes to 127.0.0.1; only the header
+    /// changes. Defaults to `127.0.0.1:<port>`. Spaces and control characters are refused.
+    #[schemars(extend("examples" = ["${{ self.hosts[0] }}","api.example.invalid"]))]
+    pub host: Option<Templated<String>>,
     /// How long the HTTP check may take to pass, replacing the check's `timeout`; defaults
     /// to 60s. When it runs out, a service is marked failed but keeps running, and for an
     /// infra container the start fails.

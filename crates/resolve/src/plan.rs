@@ -909,6 +909,7 @@ pub fn container_ready(
             port: None,
             path: route,
             status,
+            host: http_host(http, context, path)?,
         }
     } else if let Some(log) = &check.log {
         ContainerCheck::Log {
@@ -928,6 +929,24 @@ pub fn container_ready(
         check: spec,
         timeout: timeout.unwrap_or(DEFAULT_READY_TIMEOUT),
     }))
+}
+
+/// Evaluates `ready.http.host` (`path` is the `ready` key) and checks the result,
+/// since a template can produce what a literal would have been refused for.
+fn http_host(
+    http: &devlanes_config::HttpReady,
+    context: &ExpressionContext,
+    path: &str,
+) -> Result<Option<String>, ResolveError> {
+    let Some(value) = &http.host else {
+        return Ok(None);
+    };
+    let path = format!("{path}.http.host");
+    let host = value
+        .evaluate(context)
+        .map_err(|e| ResolveError::expression(&path, e))?;
+    devlanes_config::check_host_header(&host).map_err(|why| ResolveError::invalid(&path, why))?;
+    Ok(Some(host))
 }
 
 /// Converts the effective `ready` config. An http-specific timeout wins over the
@@ -983,6 +1002,7 @@ fn ready(
             port: layout.port,
             path: route,
             status,
+            host: http_host(http, context, &path)?,
         }
     } else if let Some(log) = &check.log {
         ReadySpec::Log {

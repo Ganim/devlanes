@@ -280,6 +280,8 @@ pub enum ReadySpec {
         port: u16,
         path: String,
         status: Option<u16>,
+        /// Host header to send; `None` sends `127.0.0.1:<port>`.
+        host: Option<String>,
     },
     /// Regex over ANSI-stripped output lines.
     Log {
@@ -318,6 +320,8 @@ pub enum ContainerCheck {
         port: Option<String>,
         path: String,
         status: Option<u16>,
+        /// Host header to send; `None` sends `127.0.0.1:<port>`.
+        host: Option<String>,
     },
     /// Regex over the container's log lines.
     Log {

@@ -13,7 +13,7 @@ fn check(service: &ServiceConfig) -> &ReadyCheck {
 /// Partial `stop`, `ready` and `run_script` mappings keep the keys they leave out.
 #[test]
 fn service_mappings_merge_per_key() {
-    let base = "project: demo\ntemplates:\n  base:\n    stop: { signal: SIGINT, timeout: 10s }\n    ready: { http: { path: /health, status: 204 } }\nservices:\n  api:\n    extends: base\n    run_script: { file: apps/api/package.json, name: dev }\n    ready: { http: { status: 200 } }\n";
+    let base = "project: demo\ntemplates:\n  base:\n    stop: { signal: SIGINT, timeout: 10s }\n    ready: { http: { path: /health, status: 204, host: api.example.invalid } }\nservices:\n  api:\n    extends: base\n    run_script: { file: apps/api/package.json, name: dev }\n    ready: { http: { status: 200 } }\n";
     let local = "services:\n  api:\n    stop: { timeout: 20s }\n    ready: { timeout: 5s }\n    run_script: { name: start }\n";
     for local in [None, Some(local)] {
         let config = parse_project(base, local).expect("merged");
@@ -23,6 +23,10 @@ fn service_mappings_merge_per_key() {
         let http = check(service).http.as_ref().expect("http");
         assert_eq!(http.path, Some(Templated::Literal("/health".into())));
         assert_eq!(http.status, Some(Templated::Literal(200)));
+        assert_eq!(
+            http.host,
+            Some(Templated::Literal("api.example.invalid".into()))
+        );
         let script = service.run_script.as_ref().expect("script");
         let expected_name = if local.is_some() { "start" } else { "dev" };
         assert_eq!(
