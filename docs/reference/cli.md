@@ -59,11 +59,16 @@ already run are left alone, so starting twice is safe. Waits
 until every started unit is ready or one fails; Ctrl-C detaches and leaves
 everything running.
 
+Without units or --profile it brings back the services the lane ran before,
+such as after a reboot or daemon crash. A lane stopped with devlanes stop has
+nothing to bring back and starts its default profile; start.restore: false in
+~/.devlanes/config.yaml always does that.
+
 ```text
 devlanes start [OPTIONS] [UNIT]...
 ```
 
-- `[UNIT]...`: Units to start ([lane:]unit, globs, +tag) [default: the whole lane]
+- `[UNIT]...`: Units to start ([lane:]unit, globs, +tag) [default: what the lane ran before, else its default profile]
 - `--profile <PROFILE>`: Start the units of this profile from devlanes.yaml; repeat to combine profiles (later ones win on env)
 - `--attach`: Run the start in the TUI even when DEVLANES_NO_UI or tui.open_on_start turn that off [default on a terminal]
 - `--no-ui`: Print the start as text instead of running it in the TUI
@@ -71,7 +76,8 @@ devlanes start [OPTIONS] [UNIT]...
 
 ```text
 Examples:
-  devlanes start                       the whole lane of this worktree
+  devlanes start                       what this worktree's lane ran before
+                                       (its default profile after devlanes stop)
   devlanes start api web               only these services
   devlanes start --profile e2e         the units of the e2e profile
   devlanes start 2:+api --timeout 5m   units tagged api in lane 2
@@ -79,7 +85,11 @@ Examples:
 
 ### devlanes stop
 
-Stop units, or the whole lane when none are named
+Stop units, or the whole lane when none are named.
+
+Stopped services are left out of what a plain devlanes start brings back. A
+whole-lane stop also forgets the lane's profiles, so its next plain start uses
+the default profile.
 
 ```text
 devlanes stop [OPTIONS] [UNIT]...
@@ -175,7 +185,7 @@ the command's exit code.
 devlanes with [OPTIONS] [UNIT]... -- <COMMAND>...
 ```
 
-- `[UNIT]...`: Units to start ([lane:]unit, globs, +tag) [default: the whole lane]
+- `[UNIT]...`: Units to start ([lane:]unit, globs, +tag) [default: what the lane ran before, else its default profile]
 - `--profile <PROFILE>`: Start the units of this profile from devlanes.yaml; repeat to combine profiles (later ones win on env)
 - `--logs-dir <DIR>`: Write every unit's log of the run to DIR as text files, for CI artifacts
 - `--keep`: Leave the lane running afterwards, for debugging
@@ -296,8 +306,9 @@ devlanes lane gc [OPTIONS]
 Start the lanes that were running before a reboot or daemon restart.
 
 The daemon never stores a shell's environment, so after a restart each lane
-needs one start or resume from a shell; resume uses this shell's environment
-for every lane whose last request was start.
+needs one start or resume from a shell. A plain start brings back only its own
+lane; resume uses this shell's environment for every lane that was not stopped
+by hand, and starts the services each one ran.
 
 ```text
 devlanes lane resume [OPTIONS]

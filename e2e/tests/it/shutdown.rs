@@ -116,6 +116,52 @@ fn daemon_restart_brings_back_what_ran() -> Result<()> {
     Ok(())
 }
 
+/// An on-demand service next to the default one, for a selection a plain start
+/// would not pick by itself.
+const ON_DEMAND: &str = r#"project: fixture-restore
+services:
+  api:
+    run: [fixture-server, --log-line, api-ready]
+    pty: false
+    ready: { http: { path: /healthz } }
+  worker:
+    run: [fixture-server, --log-line, worker-ready]
+    pty: false
+    autostart: false
+    ready: { http: { path: /healthz } }
+"#;
+
+/// After the daemon stops without a `devlanes stop`, a plain start brings back
+/// every service that ran, the on-demand one included; after `devlanes stop`
+/// it starts the default selection again.
+#[test]
+fn plain_start_after_daemon_stop_restores_what_ran() -> Result<()> {
+    let lab = Lab::with_config(ON_DEMAND, BUDGET)?;
+    let ready = |lab: &Lab| -> Result<Vec<String>> {
+        let lanes = lab.lanes(lab.repo())?;
+        let zero = need(lane(&lanes, "fixture-restore@0"), "lane 0")?;
+        let mut names = units_in(zero, "ready");
+        names.sort_unstable();
+        Ok(names)
+    };
+    assert_eq!(lab.json(lab.repo(), &["start"])?["ready"], true);
+    assert_eq!(lab.json(lab.repo(), &["start", "worker"])?["ready"], true);
+    let daemon = need(lab.daemon_pid()?, "daemon pid")?;
+    lab.json(lab.repo(), &["daemon", "stop", "--yes"])?;
+    wait_for_exit(&lab, daemon)?;
+
+    let restored = lab.json(lab.repo(), &["start"])?;
+    assert_eq!(restored["ready"], true, "{restored}");
+    assert_eq!(ready(&lab)?, ["api", "worker"]);
+
+    lab.json(lab.repo(), &["stop"])?;
+    let fresh = lab.json(lab.repo(), &["start"])?;
+    assert_eq!(fresh["ready"], true, "{fresh}");
+    assert_eq!(ready(&lab)?, ["api"], "a stopped lane starts its default");
+    lab.json(lab.repo(), &["stop"])?;
+    Ok(())
+}
+
 /// `devlanes daemon stop` runs the stop task, then stops the service, and
 /// reports both.
 #[test]

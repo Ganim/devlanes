@@ -485,6 +485,32 @@
       ],
       "type": "string"
     },
+    "StartConfig": {
+      "additionalProperties": false,
+      "description": "What a plain `devlanes start`, or `s` on a lane in the TUI, starts. Changes apply to the next command.",
+      "examples": [
+        {
+          "restore": true
+        },
+        {
+          "restore": false
+        }
+      ],
+      "markdownDescription": "What a plain `devlanes start`, or `s` on a lane in the TUI, starts. Changes apply to the next command.",
+      "properties": {
+        "restore": {
+          "default": true,
+          "description": "Bring back the services the lane ran before, with the same profiles, so a reboot or daemon crash costs one `devlanes start`; defaults to true. A lane stopped as a whole with `devlanes stop` has nothing to bring back and starts its `default` profile. Set false to always start the `default` profile (or every `autostart` service). `lane resume` and `daemon restart` restore either way.",
+          "examples": [
+            true,
+            false
+          ],
+          "markdownDescription": "Bring back the services the lane ran before, with the same profiles, so a reboot or daemon crash costs one `devlanes start`; defaults to true. A lane stopped as a whole with `devlanes stop` has nothing to bring back and starts its `default` profile. Set false to always start the `default` profile (or every `autostart` service). `lane resume` and `daemon restart` restore either way.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "StartupConfig": {
       "additionalProperties": false,
       "description": "Pacing of service starts, shared by every lane and project on this machine. Starts queue first come, first served; only spawning waits, running processes are never limited.",
@@ -1232,6 +1258,22 @@
         }
       ],
       "markdownDescription": "Ports of the daemon's HTTP/HTTPS proxy, which serves every `hosts` entry, and whether other devices on the network may connect to it."
+    },
+    "start": {
+      "$ref": "#/$defs/StartConfig",
+      "default": {
+        "restore": true
+      },
+      "description": "What a plain `devlanes start` (no services, no `--profile`) brings up: the services the lane ran before, or its default selection.",
+      "examples": [
+        {
+          "restore": true
+        },
+        {
+          "restore": false
+        }
+      ],
+      "markdownDescription": "What a plain `devlanes start` (no services, no `--profile`) brings up: the services the lane ran before, or its default selection."
     },
     "startup": {
       "$ref": "#/$defs/StartupConfig",

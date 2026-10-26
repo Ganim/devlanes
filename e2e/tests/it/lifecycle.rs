@@ -52,7 +52,7 @@ fn killed_client_during_start_still_brings_the_lane_up() -> Result<()> {
 /// After SIGKILL of the daemon the next command spawns a new one. A unit whose
 /// process survived (identity verified) keeps running as `orphaned` (decision 16):
 /// `start` refuses it and names the stop command, `stop` terminates it, and
-/// `lane resume` then brings the lane back.
+/// `lane resume` then brings the lane back without the service stopped by name.
 #[test]
 fn daemon_crash_reconciles_and_resumes() -> Result<()> {
     // A pipe-runner service survives its daemon (no PTY hangup), so reconciliation has
@@ -134,7 +134,7 @@ fn daemon_crash_reconciles_and_resumes() -> Result<()> {
     let back = need(lane(&lanes, "fixture-two@0"), "lane 0 after resume")?;
     assert_eq!(back["needs_env"], false, "{back}");
     assert_eq!(back["state"], "running", "{back}");
-    assert_eq!(units_in(back, "ready"), ["api", "web", "bg"], "{back}");
+    assert_eq!(units_in(back, "ready"), ["api", "web"], "{back}");
     let api = need(unit(back, "api"), "api")?;
     let (status, _) = http_get(need(port(api), "api port")?, "/healthz")?;
     assert_eq!(status, 200);

@@ -157,6 +157,7 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                  "permitted": ["localhost", "test"], "suggestion": "api.acme.test"}},
                 {"code": "memory_baseline", "data": {"peak_memory_bytes": 8_589_934_592_u64,
                  "available_memory_bytes": 4_294_967_296_u64, "units": []}},
+                {"code": "lanes_to_resume", "data": {"lanes": ["acme@1", "shop@0"]}},
             ]);
             ready
         }),

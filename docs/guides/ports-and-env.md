@@ -85,7 +85,7 @@ Two services may read each other's `url` and `public_url`. Only `env.PORT` and `
 
 Layers, lowest first. A later layer wins on the same key.
 
-1. The environment of the shell that ran `devlanes start` (or `restart`, `run`, `exec`, `lane resume`). The daemon keeps it in memory for the lane and reuses it for restarts from the TUI; it is never written to disk. `devlanes daemon restart` starts what ran again with the environment of the shell that ran it; after a reboot or `daemon stop`, `devlanes lane resume` from a shell supplies it again.
+1. The environment of the shell that ran `devlanes start` (or `restart`, `run`, `exec`, `lane resume`). The daemon keeps it in memory for the lane and reuses it for restarts from the TUI; it is never written to disk. `devlanes daemon restart` starts what ran again with the environment of the shell that ran it. After a reboot, a crash or `daemon stop`, a plain `devlanes start` brings its lane back with the current shell's environment and names the other lanes that ran; `devlanes lane resume` brings them all back.
 2. Contributors: mise, direnv, then the platform (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, …) and preset (`WRANGLER_REGISTRY_PATH`).
 3. [devlanes' own variables](#devlanes-variables): `DEVLANES=1`, `DEVLANES_PROJECT`, `DEVLANES_LANE`, `DEVLANES_LANE_NAME`, `DEVLANES_LANE_DATA`, `DEVLANES_CA_CERT`, `DEVLANES_CA_BUNDLE`; for services also `PORT`, `HOST`, `DEVLANES_SERVICE` and `DEVLANES_ORIGINS`.
 4. `global_env`.

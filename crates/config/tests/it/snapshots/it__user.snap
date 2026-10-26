@@ -54,6 +54,9 @@ expression: user
     "slot_timeout": "20000ms",
     "reserve_memory": "2147483648B"
   },
+  "start": {
+    "restore": true
+  },
   "terminal": {
     "progress": "auto",
     "title": "auto",

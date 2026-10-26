@@ -229,6 +229,7 @@ where
     let mut app = App::new(size.width, size.height);
     app.theme = options.theme();
     app.on_quit = crate::app::OnQuit::parse(options.on_quit.as_deref());
+    app.start_default = options.start_default;
     app.time_zone = options
         .time_zone
         .clone()

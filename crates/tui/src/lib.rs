@@ -76,6 +76,9 @@ pub struct Options {
     pub glyphs: Option<String>,
     /// `tui.on_quit` from the user config: `ask` (or unset), `keep` or `stop`.
     pub on_quit: Option<String>,
+    /// `start.restore: false` from the user config: `s` on a lane starts its
+    /// default selection instead of the services it ran before.
+    pub start_default: bool,
     /// The per-user service definition as `devlanes doctor` reads it
     /// (`{manager, path, installed, stop_window_s, ...}`), for the daemon
     /// page's stop-window check; `None` leaves that check out.

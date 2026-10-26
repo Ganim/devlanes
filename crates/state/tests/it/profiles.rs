@@ -196,3 +196,50 @@ async fn profiles_round_trip_and_compatibility_setter() {
     assert_eq!(fresh.profiles, selected);
     assert_eq!(fresh.profile.as_deref(), Some("worker"));
 }
+
+#[tokio::test]
+/// Saved services survive a reopen and a re-registration; the profiles setter
+/// and a clean leave them alone and empty them.
+async fn services_round_trip_and_clean_empties_them() {
+    let dir = tempfile::tempdir().expect("directory");
+    let path = dir.path().join("state.db");
+    let store = Store::open(&path).await.expect("store");
+    let project = project(&store, "acme").await;
+    let row = lane(&store, project.id, 0).await;
+    assert!(row.services.is_empty());
+    let services = vec!["web".to_owned(), "api".to_owned()];
+    store
+        .set_lane_selection(
+            row.id,
+            DesiredState::Running,
+            vec!["front".into()],
+            services.clone(),
+        )
+        .await
+        .expect("save selection");
+    store
+        .set_lane_desired_profiles(row.id, DesiredState::Running, vec!["back".into()])
+        .await
+        .expect("profiles only");
+    drop(store);
+    let store = Store::open(&path).await.expect("reopen");
+    let saved = store.lane(row.id).await.expect("query").expect("lane");
+    assert_eq!(saved.services, services);
+    assert_eq!(saved.profiles, ["back"]);
+    let registered = store
+        .upsert_lane(LaneInput {
+            project_id: project.id,
+            worktree_id: saved.worktree_id,
+            index: 0,
+            name: saved.name.clone(),
+            desired_state: saved.desired_state,
+            profile: None,
+            profiles: saved.profiles.clone(),
+        })
+        .await
+        .expect("re-register");
+    assert_eq!(registered.services, services);
+    store.clean_lane(row.id).await.expect("clean");
+    let cleaned = store.lane(row.id).await.expect("query").expect("lane");
+    assert!(cleaned.services.is_empty());
+}

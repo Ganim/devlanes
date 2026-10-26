@@ -1888,12 +1888,12 @@
               "type": "null"
             }
           ],
-          "description": "Set false for an on-demand service: a plain `devlanes start` without a `default` profile skips it, and so do globs such as `*` in profiles. Naming it or its `+tag`, on the command line or in a profile, still starts it. An expression is evaluated for each lane and acts like the `true` or `false` it gives, such as `${{ lane.index == 0 }}` to autostart only in the main lane. With `replicas`, the service starts all its copies when any copy's expression gives true. Defaults to true.",
+          "description": "Set false for an on-demand service: a plain `devlanes start` without a `default` profile skips it unless the lane ran it before, and so do globs such as `*` in profiles. Naming it or its `+tag`, on the command line or in a profile, still starts it. An expression is evaluated for each lane and acts like the `true` or `false` it gives, such as `${{ lane.index == 0 }}` to autostart only in the main lane. With `replicas`, the service starts all its copies when any copy's expression gives true. Defaults to true.",
           "examples": [
             true,
             false
           ],
-          "markdownDescription": "Set false for an on-demand service: a plain `devlanes start` without a `default` profile skips it, and so do globs such as `*` in profiles. Naming it or its `+tag`, on the command line or in a profile, still starts it. An expression is evaluated for each lane and acts like the `true` or `false` it gives, such as `${{ lane.index == 0 }}` to autostart only in the main lane. With `replicas`, the service starts all its copies when any copy's expression gives true. Defaults to true."
+          "markdownDescription": "Set false for an on-demand service: a plain `devlanes start` without a `default` profile skips it unless the lane ran it before, and so do globs such as `*` in profiles. Naming it or its `+tag`, on the command line or in a profile, still starts it. An expression is evaluated for each lane and acts like the `true` or `false` it gives, such as `${{ lane.index == 0 }}` to autostart only in the main lane. With `replicas`, the service starts all its copies when any copy's expression gives true. Defaults to true."
         },
         "cwd": {
           "anyOf": [
@@ -3081,7 +3081,7 @@
         "markdownDescription": "Services started by `devlanes start --profile <name>` (`default` when no profile is given): a list of names, globs and `+tag` selectors, or a mapping that can also exclude services, skip infra, add `env` and remap script names. Several `--profile` flags start the union."
       },
       "default": {},
-      "description": "Named selections of services for `devlanes start --profile <name>`; `default` is used when no profile is given. A profile is a list of names, globs and `+tag` selectors, or a mapping that can also exclude services, skip infra, add `env` and remap script names.",
+      "description": "Named selections of services for `devlanes start --profile <name>`. A plain `devlanes start` brings back what the lane ran before; `default` is used when there is nothing to bring back, such as after `devlanes stop`. A profile is a list of names, globs and `+tag` selectors, or a mapping that can also exclude services, skip infra, add `env` and remap script names.",
       "examples": [
         {
           "default": [
@@ -3098,7 +3098,7 @@
           }
         }
       ],
-      "markdownDescription": "Named selections of services for `devlanes start --profile <name>`; `default` is used when no profile is given. A profile is a list of names, globs and `+tag` selectors, or a mapping that can also exclude services, skip infra, add `env` and remap script names.",
+      "markdownDescription": "Named selections of services for `devlanes start --profile <name>`. A plain `devlanes start` brings back what the lane ran before; `default` is used when there is nothing to bring back, such as after `devlanes stop`. A profile is a list of names, globs and `+tag` selectors, or a mapping that can also exclude services, skip infra, add `env` and remap script names.",
       "type": "object"
     },
     "project": {

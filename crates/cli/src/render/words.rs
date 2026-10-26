@@ -1124,6 +1124,20 @@ pub(crate) fn lane_warning(code: &str, data: &Value) -> String {
             memory(data, "peak_memory_bytes"),
             memory(data, "available_memory_bytes")
         ),
+        // A plain start restored only its own lane; these ran before the daemon stopped.
+        "lanes_to_resume" => {
+            let lanes: Vec<String> = data
+                .get("lanes")
+                .and_then(Value::as_array)
+                .map(|lanes| lanes.iter().map(display_value).collect())
+                .unwrap_or_default();
+            format!(
+                "{} also ran before the daemon stopped; {} starts {}",
+                lanes.join(", "),
+                Hint::command(["lane", "resume"]).0,
+                if lanes.len() == 1 { "it" } else { "them" }
+            )
+        }
         // Inside WSL, `/mnt/<letter>` is the Windows drive `drive`.
         "windows_drive" => format!(
             "{} is on the Windows drive {}: {WINDOWS_DRIVE_COST}; move the repository to the Linux filesystem, for example ~/src",

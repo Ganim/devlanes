@@ -296,7 +296,8 @@ service_fields! {
     #[schemars(extend("examples" = [false,true]))]
     hidden: Templated<bool>,
     /// Set false for an on-demand service: a plain `devlanes start` without a `default`
-    /// profile skips it, and so do globs such as `*` in profiles. Naming it or its `+tag`,
+    /// profile skips it unless the lane ran it before, and so do globs such as `*` in
+    /// profiles. Naming it or its `+tag`,
     /// on the command line or in a profile, still starts it. An expression is evaluated for
     /// each lane and acts like the `true` or `false` it gives, such as
     /// `${{ lane.index == 0 }}` to autostart only in the main lane. With `replicas`, the

@@ -580,7 +580,7 @@ pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
     );
     if changed && loaded {
         println!(
-            "reloaded the agent; a daemon it ran was stopped with its units and started again"
+            "reloaded the agent, which restarted its daemon and stopped the units; devlanes lane resume starts them again"
         );
     }
     Ok(0)

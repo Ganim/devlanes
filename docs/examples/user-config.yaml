@@ -50,6 +50,11 @@ startup:
   # Free memory a new start must leave, beyond what starting services still need.
   # Default: 10% of RAM, at most 2GiB; 0B turns it off.
   reserve_memory: 2GiB
+# What a plain `devlanes start` brings up.
+start:
+  # Bring back the services the lane ran before (default). After `devlanes stop`
+  # there is nothing to bring back. false: always the default profile.
+  restore: true
 # Service output kept on disk, by age and total size; days also bounds database log metadata.
 logs:
   retention:

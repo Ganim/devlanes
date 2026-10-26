@@ -35,7 +35,8 @@ References:
 
 const START_AFTER: &str = "\
 Examples:
-  devlanes start                       the whole lane of this worktree
+  devlanes start                       what this worktree's lane ran before
+                                       (its default profile after devlanes stop)
   devlanes start api web               only these services
   devlanes start --profile e2e         the units of the e2e profile
   devlanes start 2:+api --timeout 5m   units tagged api in lane 2";
@@ -108,11 +109,19 @@ pub enum Command {
 Starts the lane of the current worktree, or only the named units. Units that\n\
 already run are left alone, so starting twice is safe. Waits\n\
 until every started unit is ready or one fails; Ctrl-C detaches and leaves\n\
-everything running.",
+everything running.\n\n\
+Without units or --profile it brings back the services the lane ran before,\n\
+such as after a reboot or daemon crash. A lane stopped with devlanes stop has\n\
+nothing to bring back and starts its default profile; start.restore: false in\n\
+~/.devlanes/config.yaml always does that.",
         after_help = START_AFTER
     )]
     Start(StartArgs),
     /// Stop units, or the whole lane when none are named
+    #[command(long_about = "Stop units, or the whole lane when none are named.\n\n\
+Stopped services are left out of what a plain devlanes start brings back. A\n\
+whole-lane stop also forgets the lane's profiles, so its next plain start uses\n\
+the default profile.")]
     Stop(StopArgs),
     /// Stop and start units again with a fresh environment
     Restart(RestartArgs),
@@ -250,7 +259,7 @@ without the daemon.",
 
 #[derive(Debug, Args)]
 pub struct StartArgs {
-    /// Units to start ([lane:]unit, globs, +tag) [default: the whole lane]
+    /// Units to start ([lane:]unit, globs, +tag) [default: what the lane ran before, else its default profile]
     #[arg(value_name = "UNIT")]
     pub units: Vec<String>,
     /// Start the units of this profile from devlanes.yaml; repeat to combine profiles (later ones win on env)
@@ -282,7 +291,7 @@ pub struct StopArgs {
 
 #[derive(Debug, Args)]
 pub struct WithArgs {
-    /// Units to start ([lane:]unit, globs, +tag) [default: the whole lane]
+    /// Units to start ([lane:]unit, globs, +tag) [default: what the lane ran before, else its default profile]
     #[arg(value_name = "UNIT")]
     pub units: Vec<String>,
     /// Start the units of this profile from devlanes.yaml; repeat to combine profiles (later ones win on env)
@@ -599,8 +608,9 @@ Without --start, a terminal asks whether to start the new lane right away."
     #[command(
         long_about = "Start the lanes that were running before a reboot or daemon restart.\n\n\
 The daemon never stores a shell's environment, so after a restart each lane\n\
-needs one start or resume from a shell; resume uses this shell's environment\n\
-for every lane whose last request was start."
+needs one start or resume from a shell. A plain start brings back only its own\n\
+lane; resume uses this shell's environment for every lane that was not stopped\n\
+by hand, and starts the services each one ran."
     )]
     Resume {
         /// Start every selected service immediately, bypassing the machine-wide start gate for this run
@@ -862,6 +872,8 @@ impl Cli {
                     timeout_ms: Some(timeout_ms.unwrap_or(180_000)),
                     all_at_once: args.all_at_once,
                     events: start_events,
+                    // What `--keep` leaves running stays, like a plain start's.
+                    transient: !args.keep,
                     ..Selection::default()
                 })?;
                 return Ok(Action::With(crate::WithPlan {

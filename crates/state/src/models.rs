@@ -62,6 +62,7 @@ pub(crate) struct LaneRow {
     pub profiles: String,
     pub created_at: i64,
     pub cleaned_at: Option<i64>,
+    pub services: String,
 }
 #[derive(Insertable)]
 #[diesel(table_name = lanes)]
@@ -262,6 +263,8 @@ impl TryFrom<LaneRow> for Lane {
     fn try_from(row: LaneRow) -> Result<Self, Error> {
         let profiles: Vec<String> = serde_json::from_str(&row.profiles)
             .map_err(|_| Error::Corrupt(format!("lane {} profiles", row.id)))?;
+        let services: Vec<String> = serde_json::from_str(&row.services)
+            .map_err(|_| Error::Corrupt(format!("lane {} services", row.id)))?;
         if row.profile.as_ref() != profiles.first() {
             return Err(Error::Corrupt(format!(
                 "lane {} profile does not match the first entry of its profiles",
@@ -282,6 +285,7 @@ impl TryFrom<LaneRow> for Lane {
             desired_state,
             profile: row.profile,
             profiles,
+            services,
             created_at: row.created_at,
             cleaned_at: row.cleaned_at,
         })

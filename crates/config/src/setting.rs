@@ -17,13 +17,13 @@ pub enum Applies {
     Daemon,
 }
 
-/// When a change to the dotted user config `key` takes effect. `tui` and
-/// `terminal` are read by each command; everything else by the daemon.
+/// When a change to the dotted user config `key` takes effect. `start`, `tui`
+/// and `terminal` are read by each command; everything else by the daemon.
 pub fn applies(key: &str) -> Applies {
     let section = key.split('.').next().unwrap_or(key);
     match key {
         "tui.theme" | "tui.glyphs" => Applies::Now,
-        _ if matches!(section, "tui" | "terminal") => Applies::NextCommand,
+        _ if matches!(section, "start" | "tui" | "terminal") => Applies::NextCommand,
         _ => Applies::Daemon,
     }
 }
@@ -330,6 +330,8 @@ mod tests {
         assert_eq!(applies("tui.open_on_start"), Applies::NextCommand);
         assert_eq!(applies("terminal.progress"), Applies::NextCommand);
         assert_eq!(applies("terminal"), Applies::NextCommand);
+        assert_eq!(applies("start.restore"), Applies::NextCommand);
+        assert_eq!(applies("startup.mode"), Applies::Daemon);
         assert_eq!(applies("proxy.https_port"), Applies::Daemon);
         assert_eq!(applies("tuix"), Applies::Daemon);
     }

@@ -8,7 +8,7 @@ Use typed library errors and propagate expected failures. Add concise rustdoc to
 
 Accepted exception: the daemon depends on `git`, `resolver-dns`, `resolver-hosts` and `sync` directly instead of through core traits. They are daemon-internal mechanisms with one implementation each, so a trait would add indirection without a second implementer; reviews should not flag it.
 
-The daemon owns managed resources and SQLite. Clients own rendering and actor detection. Never persist client environments. Reap managed processes by PID, never `waitpid(-1)`. Do not add auto-restart or resource enforcement.
+The daemon owns managed resources and SQLite. Clients own rendering and actor detection. Never persist client environments. Reap managed processes by PID, never `waitpid(-1)`. Do not add auto-restart or resource enforcement: a failed unit stays failed. Bringing back a lane's saved services when a client asks (a plain `start`, `lane resume`, `daemon restart`) is not auto-restart.
 
 ## Worktrees and delivery
 

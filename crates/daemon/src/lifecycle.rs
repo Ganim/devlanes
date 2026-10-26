@@ -1110,11 +1110,88 @@ pub(crate) struct TaskOutcome {
     pub leftovers: Vec<Leftovers>,
 }
 
+/// The saved services of a lane that its config still declares, for a start
+/// without services or profiles; empty falls back to its profiles.
+fn restored_services(
+    saved: Option<&devlanes_state::Lane>,
+    known: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    saved
+        .map(|record| {
+            record
+                .services
+                .iter()
+                .filter(|name| known(name))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `kept` and then `planned`, without repeats and without the services a stop
+/// took out of the start (a unit is `name` or `name.<replica>`).
+fn remembered_services(kept: &[String], planned: &[String], ctl: &StartCtl) -> Vec<String> {
+    let stopped: Vec<String> = ctl
+        .withdrawn()
+        .into_iter()
+        .filter(|(_, by)| *by == "stop")
+        .map(|(unit, _)| unit)
+        .collect();
+    let gone = |service: &str| {
+        stopped.iter().any(|unit| {
+            unit == service
+                || unit
+                    .strip_prefix(service)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
+    };
+    let mut services: Vec<String> = Vec::new();
+    for name in kept.iter().chain(planned) {
+        if !gone(name) && !services.contains(name) {
+            services.push(name.clone());
+        }
+    }
+    services
+}
+
+/// `saved` without the services of `touched` units that no longer run: a stop
+/// of one replica keeps its service while another replica still runs.
+fn without_stopped(lane: &LaneRt, saved: &[String], touched: &[String]) -> Vec<String> {
+    let st = lane.st();
+    let service_of = |unit: &str| -> String {
+        st.view
+            .as_ref()
+            .and_then(|view| view.services.iter().find(|s| s.unit == unit))
+            .map_or_else(|| unit.to_owned(), |s| s.name.clone())
+    };
+    let alive: BTreeSet<String> = st
+        .units
+        .iter()
+        .filter(|(_, rec)| rec.kind == Kind::Service && rec.host.is_alive())
+        .map(|(unit, _)| service_of(unit))
+        .chain(st.orphans.keys().map(|unit| service_of(unit)))
+        .collect();
+    let stopped: BTreeSet<String> = touched
+        .iter()
+        .map(|unit| service_of(unit))
+        .filter(|service| !alive.contains(service))
+        .collect();
+    saved
+        .iter()
+        .filter(|name| !stopped.contains(*name))
+        .cloned()
+        .collect()
+}
+
 /// Options of one start request.
 pub(crate) struct StartOptions {
     pub selectors: Vec<String>,
-    /// Requested profiles; empty keeps the lane's current ones.
+    /// Requested profiles; empty takes the lane's saved ones and, without
+    /// selectors either, brings back its saved services.
     pub profiles: Vec<String>,
+    /// Leaves the lane's saved profiles, services and desired state alone
+    /// (`devlanes with`).
+    pub transient: bool,
     pub env: Option<Arc<EnvMap>>,
     pub overrides: EnvMap,
     pub actor: Actor,
@@ -1965,13 +2042,44 @@ impl Inner {
         check_compose_files(&config, config_dir)
             .await
             .map_err(fail)?;
+        // The saved record, not the profiles in effect: a transient start changes
+        // those but must not be what the next plain start picks up.
+        let saved = lane.st().record.clone();
         let requested = if options.profiles.is_empty() {
-            lane.st().profiles.clone()
+            saved
+                .as_ref()
+                .map_or_else(|| lane.st().profiles.clone(), |r| r.profiles.clone())
         } else {
             options.profiles.clone()
         };
-        let selection = devlanes_resolve::select_profiles(&config, &requested, &options.selectors)
+        let restored = if options.selectors.is_empty() && options.profiles.is_empty() {
+            restored_services(saved.as_ref(), |name| config.services.contains_key(name))
+        } else {
+            Vec::new()
+        };
+        // A previous daemon's orphan is part of the lane: with one running, this
+        // start only adds units, like with a live unit.
+        let whole_lane = !lane.st().any_running();
+        // An idle lane comes back as it ran; a running one also gets what its
+        // profiles select and it lacks, such as a service added to the config.
+        let selectors = if whole_lane && !restored.is_empty() {
+            restored.clone()
+        } else {
+            options.selectors.clone()
+        };
+        let mut selection = devlanes_resolve::select_profiles(&config, &requested, &selectors)
             .map_err(|error| fail(crate::resolve::resolve_error(&error)))?;
+        if !whole_lane && !restored.is_empty() {
+            selection.services = config
+                .services
+                .keys()
+                .filter(|name| selection.services.contains(name) || restored.contains(name))
+                .cloned()
+                .collect();
+            selection
+                .autostart_pending
+                .retain(|name| !restored.contains(name));
+        }
         // Kept only once valid, so a typo does not stick to the lane.
         lane.st().profiles = selection.profiles.clone();
         let infra_enabled = !matches!(
@@ -1988,9 +2096,6 @@ impl Inner {
                     if matches!(options.infra, Some(Templated::Expression(_)))
             )
         });
-        // A previous daemon's orphan is part of the lane: with one running, this
-        // start only adds units, like with a live unit.
-        let whole_lane = !lane.st().any_running();
         {
             let mut st = lane.st();
             st.busy = Some("starting");
@@ -2094,13 +2199,26 @@ impl Inner {
             self.mark_unstarted(project, lane, &cx, phase, error);
         }
         let record = lane.st().record.clone();
-        if let Some(record) = record {
-            let desired = if options.setup_only {
-                record.desired_state
+        if let Some(record) = record
+            && !options.transient
+        {
+            let (desired, services) = if options.setup_only {
+                (record.desired_state, record.services.clone())
             } else {
-                DesiredState::Running
+                // Only a start of the whole selection (restored, or the profiles
+                // given) rebuilds the set; named units add to it, since what
+                // they leave out was never stopped.
+                let kept = if whole_lane && options.selectors.is_empty() {
+                    &[][..]
+                } else {
+                    &record.services[..]
+                };
+                (
+                    DesiredState::Running,
+                    remembered_services(kept, &cx.services, &cx.ctl),
+                )
             };
-            self.save_desired(lane, &record, desired, selection.profiles.clone())
+            self.save_desired(lane, &record, desired, selection.profiles.clone(), services)
                 .await;
         }
         persist("project start time", || {
@@ -2295,13 +2413,15 @@ impl Inner {
     }
 
     /// Stops units of a lane. Without selectors (and without `mine`) the whole lane
-    /// stops after its `lane.stop` tasks. Returns the stopped units.
+    /// stops after its `lane.stop` tasks. `transient` (`devlanes with`) leaves what
+    /// the lane saved for its next plain start alone. Returns the stopped units.
     pub(crate) async fn stop_lane(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
         lane: &Arc<LaneRt>,
         selectors: Option<Vec<String>>,
         mine: Option<&Actor>,
+        transient: bool,
     ) -> Result<Vec<UnitSummary>, RpcError> {
         // Before the lock: a start holding it may be waiting on these queued units,
         // or on a task that never ends (a whole-lane stop interrupts that start).
@@ -2322,7 +2442,9 @@ impl Inner {
                 lane.cancel_start();
             }
             let _op = lane.op.lock().await;
-            return self.stop_locked(project, lane, selectors, mine).await;
+            return self
+                .stop_locked(project, lane, selectors, mine, transient)
+                .await;
         }
         // Single units never wait for a start: they leave it through its control.
         // `op` held by anything else (clean, a whole stop) is waited for, with a
@@ -2330,13 +2452,13 @@ impl Inner {
         loop {
             if let Some(start) = lane.running_start() {
                 return self
-                    .stop_in_start(project, lane, &start, selectors, mine, "stop")
+                    .stop_in_start(project, lane, &start, selectors, mine, "stop", transient)
                     .await;
             }
             tokio::select! {
                 op = lane.op.lock() => {
                     let _op = op;
-                    return self.stop_locked(project, lane, selectors, mine).await;
+                    return self.stop_locked(project, lane, selectors, mine, transient).await;
                 }
                 () = tokio::time::sleep(START_POLL) => {}
             }
@@ -2347,7 +2469,9 @@ impl Inner {
     /// its `op`: the start skips units it has not spawned, stops waiting for the
     /// rest and reports them as stopped. Naming a task the start runs right now
     /// interrupts the start, as a whole-lane stop does. `by` is `stop` or
-    /// `restart`.
+    /// `restart`; only a `stop` that is not `transient` takes the units out of
+    /// what a plain start brings back.
+    #[allow(clippy::too_many_arguments)]
     async fn stop_in_start(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
@@ -2356,7 +2480,9 @@ impl Inner {
         selectors: Option<Vec<String>>,
         mine: Option<&Actor>,
         by: &'static str,
+        transient: bool,
     ) -> Result<Vec<UnitSummary>, RpcError> {
+        let transient = transient || by != "stop";
         let reference = lane.st().reference(&project.name());
         // Tasks the start runs or plans count even before the lane records their
         // unit: the runner may have spawned one that is not registered yet.
@@ -2381,7 +2507,9 @@ impl Inner {
         // are picked; every later one sees the withdrawal.
         lane.spawns_settled().await;
         let mut stopped = self
-            .stop_named(project, lane, &reference, &names, mine, false, false)
+            .stop_named(
+                project, lane, &reference, &names, mine, false, transient, false,
+            )
             .await;
         // Units the start had not spawned yet are stopped too, as far as it goes.
         let st = lane.st();
@@ -2425,6 +2553,7 @@ impl Inner {
         lane: &Arc<LaneRt>,
         selectors: Option<Vec<String>>,
         mine: Option<&Actor>,
+        transient: bool,
     ) -> Result<Vec<UnitSummary>, RpcError> {
         // A unit between its last cancellation check and its record would be
         // missed by the target list below.
@@ -2440,7 +2569,9 @@ impl Inner {
         }
         let names = Self::matching_units(lane, &reference, selectors.as_deref(), &BTreeSet::new())?;
         Ok(self
-            .stop_named(project, lane, &reference, &names, mine, whole, true)
+            .stop_named(
+                project, lane, &reference, &names, mine, whole, transient, true,
+            )
             .await)
     }
 
@@ -2483,8 +2614,10 @@ impl Inner {
 
     /// Stops the live units and orphans among `names` (for `mine`, the caller's
     /// only) and returns them. `whole` settles crashed services and records the
-    /// lane as stopped; `owns_lane` (the caller holds `op`) shows it `stopping`
-    /// meanwhile, which a running start's `starting` must not be replaced by.
+    /// lane as stopped, forgetting what a plain start would bring back; otherwise
+    /// the stopped services leave that set. `transient` saves nothing.
+    /// `owns_lane` (the caller holds `op`) shows the lane `stopping` meanwhile,
+    /// which a running start's `starting` must not be replaced by.
     #[allow(clippy::too_many_arguments)]
     async fn stop_named(
         self: &Arc<Self>,
@@ -2494,6 +2627,7 @@ impl Inner {
         names: &[String],
         mine: Option<&Actor>,
         whole: bool,
+        transient: bool,
         owns_lane: bool,
     ) -> Vec<UnitSummary> {
         let (targets, orphans): (Vec<String>, Vec<String>) = {
@@ -2555,14 +2689,38 @@ impl Inner {
             }
         }
         let record = lane.st().record.clone();
-        if whole && let Some(record) = record {
-            self.save_desired(
-                lane,
-                &record,
-                DesiredState::Stopped,
-                record.profiles.clone(),
-            )
-            .await;
+        match record {
+            // The profiles of a short-lived start go with it.
+            Some(record) if transient => {
+                if whole {
+                    lane.st().profiles = record.profiles.clone();
+                }
+            }
+            // A lane stopped by hand starts from its default next time.
+            Some(record) if whole => {
+                lane.st().profiles = Vec::new();
+                self.save_desired(lane, &record, DesiredState::Stopped, Vec::new(), Vec::new())
+                    .await;
+            }
+            Some(record) => {
+                let touched: Vec<String> = if mine.is_some() {
+                    targets.iter().chain(&orphans).cloned().collect()
+                } else {
+                    names.to_vec()
+                };
+                let services = without_stopped(lane, &record.services, &touched);
+                if services != record.services {
+                    self.save_desired(
+                        lane,
+                        &record,
+                        record.desired_state,
+                        record.profiles.clone(),
+                        services,
+                    )
+                    .await;
+                }
+            }
+            None => {}
         }
         if owns_lane {
             lane.st().busy = None;
@@ -2647,6 +2805,7 @@ impl Inner {
                     Some(selectors.to_vec()),
                     None,
                     "restart",
+                    false,
                 )
                 .await?;
                 start.services_done.cancelled().await;
@@ -2695,6 +2854,7 @@ impl Inner {
                         &record,
                         record.desired_state,
                         selection.profiles.clone(),
+                        record.services.clone(),
                     )
                     .await;
                 }
@@ -2830,6 +2990,21 @@ impl Inner {
         self.phase_event(&cx, phase, state, why, None);
         // Replicas not named by the selectors stay as they are.
         cx.already_running.retain(|unit| units.contains(unit));
+        // A restarted service runs again, so a plain start after a crash brings it back.
+        let record = lane.st().record.clone();
+        if let Some(record) = record {
+            let services = remembered_services(&record.services, &cx.services, &cx.ctl);
+            if services != record.services {
+                self.save_desired(
+                    lane,
+                    &record,
+                    DesiredState::Running,
+                    record.profiles.clone(),
+                    services,
+                )
+                .await;
+            }
+        }
         drop(op);
         drop(spawning);
         if let PhaseResult::Error(error) = result {
@@ -2864,7 +3039,7 @@ impl Inner {
         // flight, so the stop below sees every unit and none appears until the
         // records are gone.
         let _closed = lane.close_adhoc().await;
-        let stopped = self.stop_locked(project, lane, None, None).await?;
+        let stopped = self.stop_locked(project, lane, None, None, false).await?;
         // A unit whose stop timed out (or an orphan that would not end) still runs;
         // releasing the lane would leave it untracked.
         self.refuse_running(project, lane)?;
@@ -2999,6 +3174,7 @@ impl Inner {
             StartOptions {
                 selectors: Vec::new(),
                 profiles: Vec::new(),
+                transient: false,
                 env,
                 overrides: EnvMap::new(),
                 actor: Actor::default(),
@@ -3124,18 +3300,20 @@ impl Inner {
         ))
     }
 
-    /// Stores the lane's desired state and profiles, then refreshes its record.
+    /// Stores the lane's desired state, profiles and the services a plain start
+    /// brings back, then refreshes its record.
     async fn save_desired(
         &self,
         lane: &LaneRt,
         record: &devlanes_state::Lane,
         desired: DesiredState,
         profiles: Vec<String>,
+        services: Vec<String>,
     ) {
         let id = record.id;
         let saved = persist("lane desired state", || {
             self.store
-                .set_lane_desired_profiles(id, desired, profiles.clone())
+                .set_lane_selection(id, desired, profiles.clone(), services.clone())
         })
         .await;
         if saved && let Some(updated) = self.store.lane(id).await.ok().flatten() {

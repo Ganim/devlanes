@@ -46,6 +46,18 @@ fn running(summary: &LaneSummary) -> Vec<&str> {
         .collect()
 }
 
+/// A harness over `home` with fake infra, for [`CONFIG`]'s container.
+async fn with_infra(home: &std::path::Path) -> crate::Harness {
+    harness(
+        home,
+        Setup {
+            infra: true,
+            ..Setup::default()
+        },
+    )
+    .await
+}
+
 /// Number of `infra.up` calls so far.
 fn ups(h: &crate::Harness) -> usize {
     h.infra
@@ -137,9 +149,9 @@ async fn several_profiles_select_merge_and_persist() {
         )
         .await
         .expect("start");
-        h.call(Method::Stop, json!({}), cx(&main)).await.expect("stop");
+        // A daemon that stops without a `devlanes stop` keeps the lane's selection.
         h.close().await;
-        let again = harness(&home, Setup::default()).await;
+        let again = with_infra(&home).await;
         assert_eq!(lane(&again, &main).await.profiles, ["front", "back"]);
         again.close().await;
     })
@@ -147,10 +159,163 @@ async fn several_profiles_select_merge_and_persist() {
     .expect("timeout");
 }
 
+/// Names of `summary`'s running units, sorted.
+fn running_sorted(summary: &LaneSummary) -> Vec<&str> {
+    let mut names = running(summary);
+    names.sort_unstable();
+    names
+}
+
 #[tokio::test(flavor = "multi_thread")]
-/// An empty selection keeps the previous profiles (start and restart); sending
-/// the default profile name resets the lane to its default selection.
-async fn empty_keeps_and_default_resets_profiles() {
+/// A plain start after a daemon restart brings back the services that ran, with
+/// their profiles: one added by name stays, one stopped by name does not, and a
+/// `transient` start and stop (`devlanes with`) change nothing.
+async fn plain_start_restores_what_ran_before_the_daemon_stopped() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let home = tmp.path.join("home");
+        let h = with_infra(&home).await;
+        h.call(Method::Start, json!({"profiles": ["front"]}), cx(&main))
+            .await
+            .expect("start front");
+        h.call(
+            Method::Start,
+            json!({"units": ["api", "worker"]}),
+            cx(&main),
+        )
+        .await
+        .expect("start api and worker");
+        h.call(Method::Stop, json!({"units": ["worker"]}), cx(&main))
+            .await
+            .expect("stop worker");
+        h.call(Method::Restart, json!({"units": ["web"]}), cx(&main))
+            .await
+            .expect("restart");
+        h.call(
+            Method::Start,
+            json!({"units": ["worker"], "profiles": ["back"], "transient": true}),
+            cx(&main),
+        )
+        .await
+        .expect("transient start");
+        h.call(
+            Method::Stop,
+            json!({"units": ["worker"], "transient": true}),
+            cx(&main),
+        )
+        .await
+        .expect("transient stop");
+        let before = lane(&h, &main).await;
+        assert_eq!(running_sorted(&before), ["api", "web"]);
+        h.close().await;
+
+        let again = with_infra(&home).await;
+        assert!(lane(&again, &main).await.needs_env);
+        let started: StartResult = serde_json::from_value(
+            again
+                .call(Method::Start, json!({}), cx(&main))
+                .await
+                .expect("plain start"),
+        )
+        .expect("start result");
+        assert!(started.whole_lane);
+        let restored = lane(&again, &main).await;
+        assert_eq!(restored.profiles, ["front"]);
+        assert_eq!(running_sorted(&restored), ["api", "web"]);
+        again.close().await;
+
+        // Naming one service on an idle lane keeps the others it never stopped.
+        let third = with_infra(&home).await;
+        third
+            .call(Method::Start, json!({"units": ["web"]}), cx(&main))
+            .await
+            .expect("start web");
+        assert_eq!(running_sorted(&lane(&third, &main).await), ["web"]);
+        third.close().await;
+        let fourth = with_infra(&home).await;
+        fourth
+            .call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("plain start");
+        assert_eq!(running_sorted(&lane(&fourth, &main).await), ["api", "web"]);
+        fourth
+            .call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        fourth.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// After a restart only the lane a plain start runs in comes back; the result
+/// names the other lanes that ran for `lane resume`, which brings them back too.
+async fn plain_start_names_other_lanes_to_resume() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let other = tmp.path.join("wt");
+        worktree(&main, &other, "feat/other");
+        let home = tmp.path.join("home");
+        let h = with_infra(&home).await;
+        h.call(Method::LaneList, json!({}), cx(&main))
+            .await
+            .expect("lane list");
+        for cwd in [&main, &other] {
+            h.call(Method::Start, json!({"units": ["web"]}), cx(cwd))
+                .await
+                .expect("start");
+        }
+        h.close().await;
+
+        let again = with_infra(&home).await;
+        let started = again
+            .call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("plain start");
+        let warning = started["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .find(|w| w["code"] == "lanes_to_resume")
+            .cloned()
+            .expect("lanes_to_resume");
+        assert_eq!(warning["data"]["lanes"], json!(["demo@1"]));
+        let second = || async {
+            let value = again
+                .call(Method::LaneList, json!({}), cx(&main))
+                .await
+                .expect("lanes");
+            let page: Page<LaneSummary> = serde_json::from_value(value).expect("page");
+            page.items
+                .into_iter()
+                .find(|lane| lane.reference == "demo@1")
+                .expect("demo@1")
+        };
+        assert!(running(&second().await).is_empty());
+        again
+            .call(Method::Resume, json!({}), cx(&main))
+            .await
+            .expect("resume");
+        assert_eq!(running(&second().await), ["web"]);
+        for cwd in [&main, &other] {
+            again
+                .call(Method::Stop, json!({}), cx(cwd))
+                .await
+                .expect("stop");
+        }
+        again.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A lane stopped as a whole forgets its services and profiles: the next plain
+/// start uses its default, as sending the default profile name does.
+async fn whole_stop_resets_to_the_default() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
         let main = repo(&tmp.path, "r", CONFIG);
@@ -168,16 +333,17 @@ async fn empty_keeps_and_default_resets_profiles() {
         h.call(Method::Stop, json!({}), cx(&main))
             .await
             .expect("stop");
+        assert!(lane(&h, &main).await.profiles.is_empty());
         h.call(Method::Start, json!({}), cx(&main))
             .await
             .expect("start");
-        let kept = lane(&h, &main).await;
-        assert_eq!(kept.profiles, ["front"]);
-        assert_eq!(running(&kept), ["web"]);
-        h.call(Method::Restart, json!({"units": ["web"]}), cx(&main))
-            .await
-            .expect("restart");
-        assert_eq!(lane(&h, &main).await.profiles, ["front"]);
+        let fresh = lane(&h, &main).await;
+        assert!(fresh.profiles.is_empty());
+        assert_eq!(
+            running_sorted(&fresh),
+            ["api", "web", "worker"],
+            "every autostart service"
+        );
         h.call(Method::Stop, json!({}), cx(&main))
             .await
             .expect("stop");

@@ -16,8 +16,8 @@ pub const DEFAULT_MAX_SIZE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Settings for this machine, shared by every project, read from `config.yaml` in the
 /// devlanes home (`~/.devlanes`, or `$DEVLANES_HOME`). The daemon reads the file when it
-/// starts, so most changes need `devlanes daemon restart`; `tui` and `terminal` apply to
-/// the next command. An unknown key or invalid value stops the daemon from starting, with
+/// starts, so most changes need `devlanes daemon restart`; `start`, `tui` and `terminal`
+/// apply to the next command. An unknown key or invalid value stops the daemon from starting, with
 /// the file and line to fix; `devlanes doctor` checks the file without restarting.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -56,6 +56,9 @@ pub struct UserConfig {
     /// projects, so a large start does not overload the machine. Defaults to one start
     /// per CPU core.
     pub startup: StartupConfig,
+    /// What a plain `devlanes start` (no services, no `--profile`) brings up: the
+    /// services the lane ran before, or its default selection.
+    pub start: StartConfig,
     /// Terminal integration of the CLI, written as a mapping with `progress` (the tab's
     /// progress bar during starts). A plain string, the terminal app name older versions
     /// used, is still accepted but ignored with a warning.
@@ -68,6 +71,28 @@ pub struct UserConfig {
     /// The daemon's lifetime: whether it stops on its own once the last TUI closes and
     /// nothing runs.
     pub daemon: DaemonConfig,
+}
+
+/// What a plain `devlanes start`, or `s` on a lane in the TUI, starts. Changes apply
+/// to the next command.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"restore":true},{"restore":false}]))]
+pub struct StartConfig {
+    /// Bring back the services the lane ran before, with the same profiles, so a
+    /// reboot or daemon crash costs one `devlanes start`; defaults to true. A lane
+    /// stopped as a whole with `devlanes stop` has nothing to bring back and starts
+    /// its `default` profile. Set false to always start the `default` profile (or
+    /// every `autostart` service). `lane resume` and `daemon restart` restore either way.
+    #[schemars(extend("examples" = [true,false]))]
+    pub restore: bool,
+}
+
+impl Default for StartConfig {
+    /// Restores what ran before.
+    fn default() -> Self {
+        Self { restore: true }
+    }
 }
 
 /// Terminal UI settings: when it opens, its colors and symbols, and what quitting does

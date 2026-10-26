@@ -33,7 +33,7 @@ use crate::ui::{fit, spans_width, spread};
 const CATEGORIES: [(&str, &[&str]); 4] = [
     ("general", &["tui", "terminal", "updates"]),
     ("network", &["proxy", "hostnames", "ports", "tls"]),
-    ("startup", &["startup"]),
+    ("startup", &["start", "startup"]),
     ("storage", &["logs", "metrics", "history", "state"]),
 ];
 

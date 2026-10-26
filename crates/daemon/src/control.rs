@@ -184,6 +184,7 @@ impl Inner {
             StartOptions {
                 selectors,
                 profiles: selection.profile_names(),
+                transient: selection.transient,
                 env: carries_env(context),
                 overrides: selection.env.clone(),
                 actor: context.actor.clone(),
@@ -195,7 +196,26 @@ impl Inner {
                 arrival,
             },
         );
-        let result = self.with_lane_events(session, stream, start).await?;
+        let mut result = self.with_lane_events(session, stream, start).await?;
+        // Only this lane came back; the shell's env may not suit the others, so
+        // they are named for `lane resume` instead of started too.
+        if selection.units.is_empty() && selection.profile_names().is_empty() {
+            let waiting: Vec<String> = self
+                .all_lanes()
+                .into_iter()
+                .filter(|(_, other)| !Arc::ptr_eq(other, &lane))
+                .filter_map(|(project, other)| {
+                    let st = other.st();
+                    (st.present && st.needs_env()).then(|| st.reference(&project.name()))
+                })
+                .collect();
+            if !waiting.is_empty() {
+                result.warnings.push(devlanes_proto::LaneWarning {
+                    code: "lanes_to_resume".into(),
+                    data: json!({"lanes": waiting}),
+                });
+            }
+        }
         serde_json::to_value(result).map_err(|e| internal("encode", e))
     }
 
@@ -213,7 +233,7 @@ impl Inner {
             for (project, lane) in self.all_lanes() {
                 if lane.st().any_running() {
                     match self
-                        .stop_lane(&project, &lane, None, Some(&context.actor))
+                        .stop_lane(&project, &lane, None, Some(&context.actor), false)
                         .await
                     {
                         Ok(units) => stopped.extend(units),
@@ -229,7 +249,9 @@ impl Inner {
                 self.lane_for_units(&selection.units, context).await?;
             let selectors = (!selectors.is_empty()).then_some(selectors);
             let mine = selection.mine.then_some(&context.actor);
-            stopped = self.stop_lane(&project, &lane, selectors, mine).await?;
+            stopped = self
+                .stop_lane(&project, &lane, selectors, mine, selection.transient)
+                .await?;
         }
         let mut result =
             serde_json::to_value(Page::complete(stopped)).map_err(|e| internal("encode", e))?;
@@ -264,6 +286,7 @@ impl Inner {
             StartOptions {
                 selectors: selectors.clone(),
                 profiles: selection.profile_names(),
+                transient: false,
                 env: carries_env(context),
                 overrides: selection.env.clone(),
                 actor: context.actor.clone(),
@@ -319,6 +342,7 @@ impl Inner {
                         StartOptions {
                             selectors: Vec::new(),
                             profiles: Vec::new(),
+                            transient: false,
                             env: Some(env.clone()),
                             overrides: EnvMap::new(),
                             actor: context.actor.clone(),
@@ -395,6 +419,7 @@ impl Inner {
                 StartOptions {
                     selectors: Vec::new(),
                     profiles: Vec::new(),
+                    transient: false,
                     env,
                     overrides: EnvMap::new(),
                     actor: context.actor.clone(),
